@@ -1,0 +1,36 @@
+{
+  "manifest_version": 3,
+  "name": "GRID GPT Raw Image Downloader",
+  "version": "1.9.8",
+  "description": "Export original ChatGPT images and metadata, with optional prompt grouping.",
+  "homepage_url": "https://github.com/Quaternijkon/GRID-GPT-Raw-Image-Downloader",
+  "host_permissions": [
+    "https://chatgpt.com/*"
+  ],
+  "permissions": [
+    "downloads",
+    "storage"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://chatgpt.com/*"
+      ],
+      "js": [
+        "original-images.js",
+        "image-lists.js",
+        "download-queue.js",
+        "image-numbering.js",
+        "download-progress.js",
+        "prompt-resolver.js",
+        "prompt-groups.js",
+        "prompt-conversations.js",
+        "content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}
