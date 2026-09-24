@@ -156,19 +156,19 @@ test('conversation reads remain serial from the first request', async () => {
   });
   assert.equal(peak, 1);
   assert.equal(result.peakRequests, 1);
-  assert.equal(result.requestGapMs, 1000);
+  assert.equal(result.requestGapMs, 10000);
   assert.equal(result.rateLimitEpisodes, 0);
   assert.equal(result.complete, true);
 });
 
-test('the next conversation starts one second after the prior response completes', async () => {
+test('the next conversation starts ten seconds after the prior response completes', async () => {
   let time = 0;
   const starts = [];
   const result = await collectActual([entry('a', 'a'), entry('b', 'b'), entry('c', 'c')], {
     now: () => time, sleep: async ms => { time += ms; }, resolver,
     client: { apiFetch: async () => { starts.push(time); time += 250; return response(); } }
   });
-  assert.deepEqual(starts, [0, 1250, 2500]);
+  assert.deepEqual(starts, [0, 10250, 20500]);
   assert.equal(result.peakRequests, 1);
   assert.equal(result.complete, true);
 });
@@ -198,17 +198,17 @@ test('three separate 429 episodes keep the same conversation pending until it su
     client: { apiFetch: async () => { starts.push(time); return starts.length <= 3 ? response(429) : response(); } }, resolver,
     onProgress: value => progress.push(value)
   });
-  assert.deepEqual(starts, [0, 60000, 180000, 420000]);
+  assert.deepEqual(starts, [0, 20000, 40000, 60000]);
   assert.equal(result.rateLimitCount, 3);
   assert.equal(result.rateLimitEpisodes, 3);
   assert.equal(result.targetConcurrency, 1);
   assert.equal(result.requestGapMs, 10000);
-  assert.equal(result.lastFallbackCooldownMs, 240000);
+  assert.equal(result.lastFallbackCooldownMs, 20000);
   assert.equal(result.cooldownSource, 'fallback');
   assert.equal(result.complete, true);
   assert.equal(result.stopped, false);
   assert.equal(result.deferredConversations, 0);
-  assert.ok(progress.some(value => value.retryInMs === 60000));
+  assert.ok(progress.some(value => value.retryInMs === 20000));
 });
 
 test('a recovered 429 keeps serial pacing for the next conversation', async () => {
@@ -218,11 +218,11 @@ test('a recovered 429 keeps serial pacing for the next conversation', async () =
     now: () => time, sleep: async ms => { time += ms; }, resolver,
     client: { apiFetch: async () => { starts.push(time); return ++calls === 1 ? response(429) : response(); } }
   });
-  assert.deepEqual(starts, [0, 60000, 63000]);
+  assert.deepEqual(starts, [0, 20000, 30000]);
   assert.equal(result.rateLimitCount, 1);
   assert.equal(result.rateLimitEpisodes, 1);
   assert.equal(result.targetConcurrency, 1);
-  assert.equal(result.requestGapMs, 3000);
+  assert.equal(result.requestGapMs, 10000);
   assert.equal(result.complete, true);
 });
 
@@ -252,7 +252,7 @@ test('Retry-After HTTP date is honored and successful records survive a later co
       return ++attempt === 2 ? response(429, null, 'Wed, 23 Sep 2026 00:05:00 GMT') : response();
     } }, resolver
   });
-  assert.deepEqual(starts.map(t => t - starts[0]), [0, 1000, 300000, 303000]);
+  assert.deepEqual(starts.map(t => t - starts[0]), [0, 10000, 300000, 310000]);
   assert.equal(result.complete, true);
   assert.equal(result.resolvedImages, 3);
   assert.equal(result.cooldownSource, 'server');

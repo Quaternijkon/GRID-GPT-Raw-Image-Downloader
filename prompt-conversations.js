@@ -1,7 +1,7 @@
 /* Authenticated conversation reads, isolated from original-image concurrency. */
 (() => {
-  const MAX_ATTEMPTS = 3, CONCURRENCY = 1, REQUEST_GAP_MS = 1000, MAX_DELAY_MS = 10000;
-  const MAX_RATE_LIMIT_GAP_MS = 10000, MAX_RATE_LIMIT_COOLDOWN_MS = 300000;
+  const MAX_ATTEMPTS = 3, CONCURRENCY = 1, REQUEST_GAP_MS = 10000;
+  const RATE_LIMIT_EXTRA_WAIT_MS = 10000, MAX_DELAY_MS = 10000;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const transient = status => [408, 425, 429].includes(status) || status >= 500 && status <= 599;
   function failure(code, message, extra = {}) { return Object.assign(new Error(message), { code, ...extra }); }
@@ -71,7 +71,8 @@
     let processedConversations = 0, resolvedImages = 0;
     let cancelled = false, cancellation;
     let nextRequestAt = 0, cooldownUntil = 0, retryInMs = 0;
-    let requestGapMs = REQUEST_GAP_MS, targetConcurrency = CONCURRENCY, activeRequests = 0, peakRequests = 0;
+    const requestGapMs = REQUEST_GAP_MS;
+    let targetConcurrency = CONCURRENCY, activeRequests = 0, peakRequests = 0;
     let requestCount = 0, rateLimitCount = 0, rateLimitEpisodes = 0;
     let lastServerRetryAfterMs = null, lastFallbackCooldownMs = 0, cooldownSource = null;
     let lastWaitProgressAt = -Infinity;
@@ -204,14 +205,10 @@
           }
           if (error.status === 429) {
             rateLimitCount++;
-            if (!inCooldown || rateLimitEpisodes === 0) {
-              rateLimitEpisodes++;
-              requestGapMs = Math.min(MAX_RATE_LIMIT_GAP_MS, Math.max(3000, requestGapMs * 2));
-            }
+            if (!inCooldown || rateLimitEpisodes === 0) rateLimitEpisodes++;
             targetConcurrency = 1;
             lastServerRetryAfterMs = error.retryAfterMs || null;
-            lastFallbackCooldownMs = Math.min(MAX_RATE_LIMIT_COOLDOWN_MS,
-              60000 * 2 ** Math.min(rateLimitEpisodes - 1, 3));
+            lastFallbackCooldownMs = REQUEST_GAP_MS + RATE_LIMIT_EXTRA_WAIT_MS;
             cooldownSource = (error.retryAfterMs || 0) > lastFallbackCooldownMs ? 'server' : 'fallback';
             const delay = Math.max(error.retryAfterMs || 0, lastFallbackCooldownMs);
             cooldownUntil = Math.max(cooldownUntil, now() + delay);

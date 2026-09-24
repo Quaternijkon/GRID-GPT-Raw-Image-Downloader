@@ -399,9 +399,7 @@ function addBulkDownloadButton() {
               const detail = promptFailureDetail(update.errorSummary);
               const waiting = update.retryInMs > 0
                 ? ` · 服务限流，${Math.ceil(update.retryInMs / 1000)} 秒后重试（${update.cooldownSource === 'server' ? '服务端要求' : '插件退避'}；不会跳过未读会话）` : '';
-              const pacing = update.rateLimitEpisodes
-                ? ` · 限流后串行，间隔 ${Math.ceil(update.requestGapMs / 1000)} 秒`
-                : ` · 串行读取，间隔 ${Math.ceil(update.requestGapMs / 1000)} 秒`;
+              const pacing = ` · 串行读取，间隔 ${Math.ceil(update.requestGapMs / 1000)} 秒`;
               const remaining = Math.max(0, (update.conversationCount || 0) - (update.processedConversations || 0) - 1);
               const lowerBound = remaining && update.requestGapMs > 0
                 ? ` · 按当前间隔至少约 ${Math.ceil(remaining * update.requestGapMs / 60000)} 分钟` : '';
@@ -797,7 +795,7 @@ async function chooseDownloadLocation() {
             <p id="bulk-dl-numbering-note" class="hint">Oldest image = 000001. For your first export with this numbering, use 0 in a new folder. Older versions used a different order.</p>
             <div class="prompt-option">
               <button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false" aria-describedby="bulk-dl-prompts-hint">保存提示词 <span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
-              <p id="bulk-dl-prompts-hint" class="hint">开启后从第一条会话起串行读取，每次请求完成后至少等待 1 秒；如遇服务限流会暂停并延长到至少 15 秒。数百个会话仍需数分钟，限流等待会更久。相同提示词归入同一目录，无法解析的图片放入“未解析”。建议使用新目录。</p>
+              <p id="bulk-dl-prompts-hint" class="hint">开启后串行读取会话，每次请求完成后等 10 秒；若收到 429，再额外等 10 秒（服务端要求更久时按其时间）。数百个会话可能需要一小时以上。相同提示词归入同一目录，无法解析的图片放入“未解析”。建议使用新目录。</p>
             </div>
             <div class="parallel">
               <div><label for="bulk-dl-mode">Concurrency</label><p id="bulk-dl-parallel-hint" class="hint">Auto probes capacity and backs off when congested.</p></div>

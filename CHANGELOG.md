@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.10 — 2026-09-25
+
+- Prompt conversation reads remain serial, with a fixed ten-second completion-to-next-start gap.
+- On HTTP 429, add ten more seconds of shared cooldown, so the earliest retry is about twenty seconds after the limited response. A longer server Retry-After still takes precedence. Remove the extension's exponential per-request gap and fallback cooldown; retain retrying the same conversation without mass-deferring later work.
+- This user-selected schedule does not guarantee a rate-limit-free run. With 413 conversations, fixed spacing alone is at least about 69 minutes before network latency or server wait time. Image-stage Auto/manual concurrency is unchanged.
+- Updated static regression definitions and docs; no automated tests or full live export under the standing user instruction.
+
 ## 1.9.9 — 2026-09-24
 
 - Cap the post-429 per-conversation gap at 10 seconds instead of five minutes. Keep the initial one-second serial pace. If the service sends Retry-After, honor it; otherwise use a separate 1/2/4/5-minute shared cooldown and continue retrying the same conversation.
