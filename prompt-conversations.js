@@ -1,6 +1,7 @@
 /* Authenticated conversation reads, isolated from original-image concurrency. */
 (() => {
   const MAX_ATTEMPTS = 3, CONCURRENCY = 1, REQUEST_GAP_MS = 1000, MAX_DELAY_MS = 10000;
+  const MAX_RATE_LIMIT_GAP_MS = 10000, MAX_RATE_LIMIT_COOLDOWN_MS = 300000;
   const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
   const transient = status => [408, 425, 429].includes(status) || status >= 500 && status <= 599;
   function failure(code, message, extra = {}) { return Object.assign(new Error(message), { code, ...extra }); }
@@ -72,6 +73,7 @@
     let nextRequestAt = 0, cooldownUntil = 0, retryInMs = 0;
     let requestGapMs = REQUEST_GAP_MS, targetConcurrency = CONCURRENCY, activeRequests = 0, peakRequests = 0;
     let requestCount = 0, rateLimitCount = 0, rateLimitEpisodes = 0;
+    let lastServerRetryAfterMs = null, lastFallbackCooldownMs = 0, cooldownSource = null;
     let lastWaitProgressAt = -Infinity;
     function active() {
       if (cancelled) throw cancellation;
@@ -116,6 +118,7 @@
       try { onProgress({ conversationCount, processedConversations, resolvedImages, totalImages,
         requestCount, rateLimitCount, rateLimitEpisodes, retryInMs,
         requestGapMs, targetConcurrency, activeRequests, peakRequests,
+        lastServerRetryAfterMs, lastFallbackCooldownMs, cooldownSource,
         errorCount: errors.length, errors: errors.map(error => ({ ...error })),
         errorSummary: summarizeErrors(errors) }); } catch (_) { /* UI is advisory. */ }
     }
@@ -203,11 +206,14 @@
             rateLimitCount++;
             if (!inCooldown || rateLimitEpisodes === 0) {
               rateLimitEpisodes++;
-              requestGapMs = Math.min(300000, Math.max(15000, requestGapMs * 2));
+              requestGapMs = Math.min(MAX_RATE_LIMIT_GAP_MS, Math.max(3000, requestGapMs * 2));
             }
             targetConcurrency = 1;
-            const delay = Math.max(error.retryAfterMs || 0,
-              Math.min(1800000, 120000 * 2 ** Math.min(rateLimitEpisodes - 1, 4)));
+            lastServerRetryAfterMs = error.retryAfterMs || null;
+            lastFallbackCooldownMs = Math.min(MAX_RATE_LIMIT_COOLDOWN_MS,
+              60000 * 2 ** Math.min(rateLimitEpisodes - 1, 3));
+            cooldownSource = (error.retryAfterMs || 0) > lastFallbackCooldownMs ? 'server' : 'fallback';
+            const delay = Math.max(error.retryAfterMs || 0, lastFallbackCooldownMs);
             cooldownUntil = Math.max(cooldownUntil, now() + delay);
             nextRequestAt = Math.max(nextRequestAt, now() + requestGapMs);
             // Simultaneous in-flight 429s are one service-limit episode.
@@ -285,6 +291,7 @@
     return { records: entries.map(entry => byId.get(entry.fileId)), errors, errorSummary: summarizeErrors(errors),
       requestCount, rateLimitCount, rateLimitEpisodes, deferredConversations: 0, stopped: false,
       requestGapMs, targetConcurrency, peakRequests, cooldownUntil,
+      lastServerRetryAfterMs, lastFallbackCooldownMs, cooldownSource,
       conversationCount, processedConversations, resolvedImages, totalImages,
       complete: errors.length === 0 && resolvedImages === totalImages };
   }

@@ -9,7 +9,7 @@ The export flow in `content.js` collects API image pages, validates the complete
 | `image-lists.js` | Paginated gallery and Library collection with partial-result diagnostics. |
 | `image-numbering.js` | Full-set file-ID deduplication, creation-time ordering and incremental number filtering. |
 | `original-images.js` | Same-origin authentication, original-resource resolution, byte validation and quality measurements. |
-| `prompt-conversations.js` | Bounded conversation reads, one-second initial serial pacing and shared HTTP 429 cooldown. |
+| `prompt-conversations.js` | Bounded conversation reads, one-second initial serial pacing and shared HTTP 429 cooldown with a ten-second post-limit gap cap. |
 | `prompt-resolver.js` | Structural prompt recovery from real output ancestry, including reference-image and text-only requests. |
 | `prompt-groups.js` | Exact cumulative-text grouping and the fixed `未解析/` fallback. |
 | `download-queue.js` | Image-stage Auto/manual admission; independent from prompt-reading concurrency. |
@@ -21,3 +21,5 @@ The extension sends no data to a third-party service. It uses the user's authent
 Image-list identity and an original download URL do not prove that the corresponding output message still exists in the conversation mapping. Missing output identity, unsupported structure and unavailable originals remain explicit failures rather than inferred prompts or thumbnail substitutions. HTTP 429 pauses prompt reads and retries the same conversation; other bounded network errors and structural errors are reported separately. In-memory prompt progress is lost when the page closes or reloads.
 
 Regression definitions are in `tests/` and use Node's built-in test runner. The current release has received static review; the session's standing instruction has deferred automated test execution and a full authenticated end-to-end run.
+
+The prompt collector distinguishes service Retry-After from its own fallback cooldown (up to five minutes when no header is supplied). A post-limit request gap is capped at ten seconds; repeated 429 responses can still extend the total run because service quotas are not published. The image gallery list and sampled original PNG metadata do not carry the exact cumulative user prompt, and opening the native media viewer produced no alternate prompt-detail request in the observed account.

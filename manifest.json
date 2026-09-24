@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GRID GPT Raw Image Downloader",
-  "version": "1.9.8",
+  "version": "1.9.9",
   "description": "Export original ChatGPT images and metadata, with optional prompt grouping.",
   "homepage_url": "https://github.com/Quaternijkon/GRID-GPT-Raw-Image-Downloader",
   "host_permissions": [

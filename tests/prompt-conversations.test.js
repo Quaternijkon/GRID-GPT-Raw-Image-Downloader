@@ -186,6 +186,8 @@ test('long Retry-After is waited out without deferring the conversation', async 
   assert.equal(result.processedConversations, 1);
   assert.equal(result.resolvedImages, 1);
   assert.equal(result.cooldownUntil, 9999000);
+  assert.equal(result.lastServerRetryAfterMs, 9999000);
+  assert.equal(result.cooldownSource, 'server');
 });
 
 test('three separate 429 episodes keep the same conversation pending until it succeeds', async () => {
@@ -196,15 +198,17 @@ test('three separate 429 episodes keep the same conversation pending until it su
     client: { apiFetch: async () => { starts.push(time); return starts.length <= 3 ? response(429) : response(); } }, resolver,
     onProgress: value => progress.push(value)
   });
-  assert.deepEqual(starts, [0, 120000, 360000, 840000]);
+  assert.deepEqual(starts, [0, 60000, 180000, 420000]);
   assert.equal(result.rateLimitCount, 3);
   assert.equal(result.rateLimitEpisodes, 3);
   assert.equal(result.targetConcurrency, 1);
-  assert.equal(result.requestGapMs, 60000);
+  assert.equal(result.requestGapMs, 10000);
+  assert.equal(result.lastFallbackCooldownMs, 240000);
+  assert.equal(result.cooldownSource, 'fallback');
   assert.equal(result.complete, true);
   assert.equal(result.stopped, false);
   assert.equal(result.deferredConversations, 0);
-  assert.ok(progress.some(value => value.retryInMs === 120000));
+  assert.ok(progress.some(value => value.retryInMs === 60000));
 });
 
 test('a recovered 429 keeps serial pacing for the next conversation', async () => {
@@ -214,11 +218,11 @@ test('a recovered 429 keeps serial pacing for the next conversation', async () =
     now: () => time, sleep: async ms => { time += ms; }, resolver,
     client: { apiFetch: async () => { starts.push(time); return ++calls === 1 ? response(429) : response(); } }
   });
-  assert.deepEqual(starts, [0, 120000, 135000]);
+  assert.deepEqual(starts, [0, 60000, 63000]);
   assert.equal(result.rateLimitCount, 1);
   assert.equal(result.rateLimitEpisodes, 1);
   assert.equal(result.targetConcurrency, 1);
-  assert.equal(result.requestGapMs, 15000);
+  assert.equal(result.requestGapMs, 3000);
   assert.equal(result.complete, true);
 });
 
@@ -248,9 +252,10 @@ test('Retry-After HTTP date is honored and successful records survive a later co
       return ++attempt === 2 ? response(429, null, 'Wed, 23 Sep 2026 00:05:00 GMT') : response();
     } }, resolver
   });
-  assert.deepEqual(starts.map(t => t - starts[0]), [0, 1000, 300000, 315000]);
+  assert.deepEqual(starts.map(t => t - starts[0]), [0, 1000, 300000, 303000]);
   assert.equal(result.complete, true);
   assert.equal(result.resolvedImages, 3);
+  assert.equal(result.cooldownSource, 'server');
 });
 
 test('network retry can recover while permanent HTTP, JSON and shape failures stay bounded', async () => {

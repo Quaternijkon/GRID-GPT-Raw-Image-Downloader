@@ -397,7 +397,8 @@ function addBulkDownloadButton() {
             client, resolver: promptResolver, checkActive: ensureSameView,
             onProgress: update => {
               const detail = promptFailureDetail(update.errorSummary);
-              const waiting = update.retryInMs > 0 ? ` · 服务限流，${Math.ceil(update.retryInMs / 1000)} 秒后重试（不会跳过未读会话）` : '';
+              const waiting = update.retryInMs > 0
+                ? ` · 服务限流，${Math.ceil(update.retryInMs / 1000)} 秒后重试（${update.cooldownSource === 'server' ? '服务端要求' : '插件退避'}；不会跳过未读会话）` : '';
               const pacing = update.rateLimitEpisodes
                 ? ` · 限流后串行，间隔 ${Math.ceil(update.requestGapMs / 1000)} 秒`
                 : ` · 串行读取，间隔 ${Math.ceil(update.requestGapMs / 1000)} 秒`;
@@ -427,6 +428,9 @@ function addBulkDownloadButton() {
             stopped: collected.stopped, stopReason: collected.stopReason,
             requestGapMs: collected.requestGapMs, targetConcurrency: collected.targetConcurrency,
             peakRequests: collected.peakRequests, cooldownUntil: collected.cooldownUntil,
+            lastServerRetryAfterMs: collected.lastServerRetryAfterMs,
+            lastFallbackCooldownMs: collected.lastFallbackCooldownMs,
+            cooldownSource: collected.cooldownSource,
             collectionErrors: collected.errors || [], errorSummary: collected.errorSummary || [] });
           status('正在按全量提示词构建分组…', 'grouping');
           panel.update({ stage: 'grouping' });
