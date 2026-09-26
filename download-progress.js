@@ -45,16 +45,16 @@
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
       <style>
-        :host { --bg:#fff;--text:#142b24;--muted:#567067;--line:#dbe7e0;--tile:#f3f8f5;--accent:#087a58;--track:#dfebe4;--warn:#a24b10; }
-        :host([data-theme="dark"]) { --bg:#14201b;--text:#eef8f2;--muted:#a1b9ad;--line:#364d40;--tile:#1c2d24;--accent:#75e3b1;--track:#30483a;--warn:#ffcb89; }
+        :host { --bg:#fff;--text:#142b24;--muted:#567067;--line:#dbe7e0;--tile:#f3f8f5;--accent:#087a58;--track:#dfebe4;--warn:#a24b10;--danger:#b3261e;--info:#1967a3; }
+        :host([data-theme="dark"]) { --bg:#14201b;--text:#eef8f2;--muted:#a1b9ad;--line:#364d40;--tile:#1c2d24;--accent:#75e3b1;--track:#30483a;--warn:#ffcb89;--danger:#ff9b92;--info:#8fc9ff; }
         * { box-sizing:border-box; }
         [hidden] { display:none!important; }
-        .card { width:390px;max-width:calc(100vw - 32px);max-height:calc(100vh - 40px);max-height:calc(100dvh - 40px);overflow:auto;
-          border:1px solid var(--line);border-radius:18px;background:var(--bg);color:var(--text);
+        .card { width:440px;max-width:calc(100vw - 24px);max-height:calc(100vh - 28px);max-height:calc(100dvh - 28px);overflow:auto;
+          border:1px solid var(--line);border-radius:22px;background:var(--bg);color:var(--text);
           box-shadow:0 18px 65px #0005;font:400 13px/1.5 system-ui,-apple-system,sans-serif;text-align:left; }
-        header { padding:18px 18px 12px;display:flex;align-items:center;gap:10px; }
-        .mark { display:grid;place-items:center;width:36px;height:36px;border-radius:11px;background:var(--tile);color:var(--accent);font-size:23px; }
-        h2 { margin:0;font-size:16px;font-weight:650;color:var(--text); }
+        header { padding:20px 20px 14px;display:flex;align-items:center;gap:12px;position:sticky;top:0;background:var(--bg);z-index:2; }
+        .mark { display:grid;place-items:center;width:42px;height:42px;border-radius:13px;background:var(--tile);color:var(--accent);font-size:25px; }
+        h2 { margin:0;font-size:18px;font-weight:700;color:var(--text); }
         .eyebrow { color:var(--muted);font-size:10px;letter-spacing:.12em; }
         .controls { display:flex;gap:4px;margin-left:auto; }
         button { appearance:none;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--muted);-webkit-text-fill-color:currentColor;
@@ -62,9 +62,9 @@
         button:hover { background:var(--tile);color:var(--text); }
         button:focus-visible { outline:2px solid var(--accent);outline-offset:2px; }
         button:disabled { opacity:.35;cursor:default; }
-        .body { padding:0 18px 16px; }
+        .body { padding:0 20px 18px; }
         .phase { display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px; }
-        .badge { color:var(--accent);background:var(--tile);padding:3px 8px;border:1px solid var(--line);border-radius:6px;font-size:11px;font-weight:650; }
+        .badge { color:var(--accent);background:var(--tile);padding:5px 9px;border:1px solid var(--line);border-radius:8px;font-size:11px;font-weight:700; }
         .mode { color:var(--muted);font-size:11px; }
         .numbers { display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:8px;font-variant-numeric:tabular-nums; }
         .numbers strong { font-size:24px;letter-spacing:-.04em;font-weight:650; }
@@ -73,45 +73,50 @@
         .track { height:7px;border-radius:8px;background:var(--track);overflow:hidden; }
         .bar { height:100%;width:0;background:var(--accent);border-radius:8px;transition:width .35s ease; }
         .chart { height:37px;display:block;width:100%;margin:10px 0 2px; }
-        .stats { display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px; }
-        .stat { background:var(--tile);border:1px solid var(--line);border-radius:10px;padding:10px 12px; }
+        .stats { display:grid;grid-template-columns:1fr 1fr;gap:9px;margin-top:14px; }
+        .stat { background:var(--tile);border:1px solid var(--line);border-radius:12px;padding:11px 13px;min-height:78px; }
         .label { display:block;font-size:10px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted); }
         .value { display:block;font-size:18px;line-height:1.6;font-variant-numeric:tabular-nums;color:var(--text); }
         .sub { font-size:10px;color:var(--muted); }
-        .status { display:flex;gap:12px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:13px 0 10px; }
+        .status { display:flex;gap:7px;flex-wrap:wrap;color:var(--muted);font-size:11px;margin:14px 0 10px; }
+        .status span { padding:4px 7px;border-radius:7px;background:var(--tile);border:1px solid var(--line); }
         .warning { color:var(--warn); }
-        .message { border-top:1px solid var(--line);padding-top:10px;font-size:11px;color:var(--muted);overflow-wrap:anywhere; }
+        .danger { color:var(--danger)!important; }
+        .info { color:var(--info)!important; }
+        .recovery { margin:10px 0;padding:9px 11px;border-radius:10px;background:var(--tile);border:1px solid var(--line);color:var(--info);font-size:11px; }
+        .message { border-top:1px solid var(--line);padding-top:11px;font-size:11px;color:var(--muted);overflow-wrap:anywhere; }
         .foot { margin-top:7px;font-size:10px;color:var(--muted); }
-        .compact { display:none;padding:0 18px 14px;color:var(--muted);font-size:12px; }
+        .compact { display:none;padding:0 20px 15px;color:var(--muted);font-size:12px; }
         :host([data-collapsed="true"]) .body { display:none; }
         :host([data-collapsed="true"]) .compact { display:block; }
         @media(prefers-reduced-motion:reduce) { .bar { transition:none; } }
       </style>
-      <section class="card" role="region" aria-label="Image export progress">
-        <header><div class="mark" aria-hidden="true">↓</div><div><div class="eyebrow">CHATGPT · BULK EXPORT</div><h2>Image export</h2></div>
-          <div class="controls"><button id="collapse" aria-label="Minimize progress" aria-expanded="true">−</button><button id="close" aria-label="Close progress" disabled>×</button></div></header>
+      <section class="card" role="region" aria-label="导出任务进度">
+        <header><div class="mark" aria-hidden="true">↓</div><div><div class="eyebrow">GRID · CHATGPT 导出</div><h2 id="title">准备导出</h2></div>
+          <div class="controls"><button id="collapse" aria-label="收起进度" aria-expanded="true">−</button><button id="close" aria-label="关闭进度" disabled>×</button></div></header>
         <div class="compact" id="compact"></div>
         <div class="body">
-          <div class="phase"><span class="badge" id="phase">PREPARING</span><span class="mode" id="mode">Auto</span></div>
-          <div class="numbers"><div><strong id="count">0</strong><span id="total"> / — processed</span></div><span class="percent" id="percent">—</span></div>
-          <div class="track" id="track" role="progressbar" aria-label="Image tasks processed" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar" id="bar"></div></div>
+          <div class="phase"><span class="badge" id="phase">准备中</span><span class="mode" id="mode">自动调节</span></div>
+          <div class="numbers"><div><strong id="count">0</strong><span id="total"> / — 已处理</span></div><span class="percent" id="percent">—</span></div>
+          <div class="track" id="track" role="progressbar" aria-label="图片任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar" id="bar"></div></div>
           <svg id="chart" class="chart" viewBox="0 0 340 34" preserveAspectRatio="none" aria-hidden="true"><path d="M0 33H340" stroke="var(--line)"/><polyline id="spark" fill="none" stroke="var(--accent)" stroke-width="1.8" points="0,33 340,33"/></svg>
           <div class="stats" id="transfer-stats">
-            <div class="stat"><span class="label">Transfer rate</span><span class="value" id="speed">—</span><span class="sub" id="average">Collecting image list</span></div>
-            <div class="stat"><span class="label">Active / target</span><span class="value" id="concurrency">—</span><span class="sub" id="control">Waiting to start</span></div>
-            <div class="stat"><span class="label">Elapsed</span><span class="value" id="elapsed">00:00</span></div>
-            <div class="stat"><span class="label">Est. remaining</span><span class="value" id="eta">—</span><span class="sub">Based on recent completions</span></div>
+            <div class="stat"><span class="label">实时速度</span><span class="value" id="speed">—</span><span class="sub" id="average">正在读取图片列表</span></div>
+            <div class="stat"><span class="label">正在处理 / 并发上限</span><span class="value" id="concurrency">—</span><span class="sub" id="control">等待开始</span></div>
+            <div class="stat"><span class="label">已经用时</span><span class="value" id="elapsed">00:00</span></div>
+            <div class="stat"><span class="label">预计剩余</span><span class="value" id="eta">—</span><span class="sub">根据最近完成速度估算</span></div>
           </div>
           <div class="stats" id="prompt-stats" hidden>
-            <div class="stat"><span class="label">Conversations processed</span><span class="value" id="conversations">0 / —</span></div>
-            <div class="stat"><span class="label">Image prompts resolved</span><span class="value" id="resolved">0 / —</span></div>
-            <div class="stat"><span class="label">All / selected groups</span><span class="value" id="groups">— / —</span></div>
-            <div class="stat"><span class="label">Selected images</span><span class="value" id="selected-images">—</span></div>
+            <div class="stat"><span class="label">已读取会话</span><span class="value" id="conversations">0 / —</span></div>
+            <div class="stat"><span class="label">已恢复提示词</span><span class="value" id="resolved">0 / —</span></div>
+            <div class="stat"><span class="label">全部 / 本次分组</span><span class="value" id="groups">— / —</span></div>
+            <div class="stat"><span class="label">本次图片</span><span class="value" id="selected-images">—</span></div>
           </div>
           <div class="status" id="prompt-errors" hidden><span id="prompt-error-count"></span><span id="prompt-save-error-count"></span></div>
-          <div class="status"><span id="queued">0 queued</span><span id="failed">0 failed</span><span id="retrying">0 retrying</span><span id="warnings">0 warnings</span></div>
-          <div id="message" class="message" role="status" aria-live="polite">Preparing export…</div>
-          <div class="foot">Queued ≠ saved to disk. Check browser Downloads for completion.</div>
+          <div class="status"><span id="queued">0 已排队</span><span id="failed">0 原图失败</span><span id="retrying">0 正在恢复</span><span id="warnings">0 条警告</span></div>
+          <div id="recovery" class="recovery" hidden>网络暂时不可用，任务会等待并继续，不会立即计为失败。</div>
+          <div id="message" class="message" role="status" aria-live="polite">正在准备导出…</div>
+          <div class="foot">“已排队”表示 Chrome 已接收任务；最终写盘状态请查看浏览器下载记录。</div>
         </div>
       </section>`;
     const el = id => root.getElementById(id);
@@ -128,7 +133,7 @@
       collapsed = !collapsed; host.dataset.collapsed = String(collapsed);
       el('collapse').textContent = collapsed ? '+' : '−';
       el('collapse').setAttribute('aria-expanded', String(!collapsed));
-      el('collapse').setAttribute('aria-label', collapsed ? 'Expand progress' : 'Minimize progress');
+      el('collapse').setAttribute('aria-label', collapsed ? '展开进度' : '收起进度');
     };
     el('close').onclick = () => { if (state.finished) onClose(); };
     document.body.appendChild(host);
@@ -139,15 +144,21 @@
       const displayCompleted = promptStage ? state.resolvedImages || 0 : completed;
       const displayTotal = promptStage ? state.totalImages : total;
       const percent = displayTotal > 0 ? Math.min(100, displayCompleted / displayTotal * 100) : state.finished && phase === 'complete' ? 100 : 0;
-      const promptPhase = { prompts: 'RESOLVING PROMPTS', grouping: 'BUILDING GROUPS', 'prompt-save': 'SAVING PROMPTS' }[state.stage];
-      el('phase').textContent = promptStage && !state.finished ? promptPhase : phase.toUpperCase();
+      const promptPhase = { prompts: '恢复提示词', grouping: '构建分组', 'prompt-save': '保存提示词' }[state.stage];
+      const phaseLabels = { preparing: '准备中', collecting: '读取列表', transferring: '下载原图', cooldown: '等待恢复',
+        backoff: '降低速度', recovering: '恢复中', finalizing: '整理结果', complete: '已完成',
+        'completed with issues': '完成但有问题', blocked: '已阻止', error: '发生错误', prompts: '恢复提示词' };
+      const phaseLabel = promptStage && !state.finished ? promptPhase : phaseLabels[phase] || String(phase);
+      el('phase').textContent = phaseLabel;
+      el('title').textContent = state.finished ? (phase === 'complete' ? '导出完成' : phase === 'completed with issues' ? '导出完成，但需要处理' : '导出已停止')
+        : promptStage ? promptPhase : state.stage === 'images' ? '正在下载原图' : '正在准备导出';
       el('phase').className = ['blocked', 'error', 'completed with issues', 'cooldown'].includes(phase) ? 'badge warning' : 'badge';
-      el('mode').textContent = promptStage ? '保存提示词' : state.mode === 'manual' ? 'Manual' : 'Auto · adaptive';
+      el('mode').textContent = promptStage ? '串行读取 · 10 秒间隔' : state.mode === 'manual' ? '手动并发' : '自动调节并发';
       el('count').textContent = displayCompleted.toLocaleString();
-      el('total').textContent = ` / ${displayTotal == null ? '—' : displayTotal.toLocaleString()} ${promptStage ? 'prompts resolved' : 'processed'}`;
+      el('total').textContent = ` / ${displayTotal == null ? '—' : displayTotal.toLocaleString()} ${promptStage ? '条提示词' : '项已处理'}`;
       el('percent').textContent = displayTotal == null ? '—' : `${percent.toFixed(1)}%`;
       el('bar').style.width = `${percent}%`; el('track').setAttribute('aria-valuenow', String(percent));
-      el('track').setAttribute('aria-label', promptStage ? 'Image prompts resolved' : 'Image tasks processed');
+      el('track').setAttribute('aria-label', promptStage ? '提示词恢复进度' : '图片任务进度');
       // SVG does not implement HTMLElement.hidden in every supported browser.
       if (promptStage) el('chart').setAttribute('hidden', '');
       else el('chart').removeAttribute('hidden');
@@ -161,25 +172,41 @@
       const errorCount = value => Array.isArray(value) ? value.length : Number(value) || 0;
       const promptErrors = errorCount(state.promptErrors), promptSaveErrors = errorCount(state.promptSaveErrors);
       el('prompt-errors').hidden = !promptStage && !promptErrors && !promptSaveErrors;
-      el('prompt-error-count').textContent = `${promptErrors} prompt resolution errors`;
-      el('prompt-save-error-count').textContent = `${promptSaveErrors} prompt save errors`;
+      el('prompt-error-count').textContent = `${promptErrors} 条提示词未解析`;
+      el('prompt-save-error-count').textContent = `${promptSaveErrors} 个提示词文件保存失败`;
       el('prompt-error-count').className = promptErrors ? 'warning' : '';
       el('prompt-save-error-count').className = promptSaveErrors ? 'warning' : '';
       el('speed').textContent = state.finished ? '—' : `${(speed / 1048576).toFixed(1)} MiB/s`;
-      el('average').textContent = `${size(state.bytes || 0)} received · avg ${((state.averageSpeed || 0) / 1048576).toFixed(1)} MiB/s`;
+      el('average').textContent = `已接收 ${size(state.bytes || 0)} · 平均 ${((state.averageSpeed || 0) / 1048576).toFixed(1)} MiB/s`;
       el('concurrency').textContent = `${active} / ${limit || '—'}`;
-      el('control').textContent = state.reason || 'Waiting to start';
+      const reasonLabels = { 'Starting': '正在启动', 'Server rate limit': '服务端限流', 'Transient request errors': '暂时性请求错误',
+        'Estimated memory budget': '受内存预算限制', 'Latency rose without throughput gain': '延迟升高，正在降速',
+        'Observing after backoff': '降速后观察中', 'Probe did not improve throughput': '并发探测未提升速度',
+        'Probe improved throughput': '并发探测有效', 'Throughput growing': '吞吐仍在上升',
+        'Throughput plateau after growth': '吞吐已到平台', 'Holding measured throughput': '保持当前稳定速度',
+        'Exploring spare capacity': '正在探测空余能力' };
+      const rawReason = state.reason || '';
+      const reasonKey = rawReason.includes(' · ') ? rawReason.split(' · ').at(-1) : rawReason;
+      el('control').textContent = reasonLabels[reasonKey] || rawReason || '等待开始';
       el('elapsed').textContent = duration(state.elapsedMs || 0);
       el('eta').textContent = state.etaMs == null ? '—' : `≈ ${duration(state.etaMs)}`;
+      const statusLabels = { queued: '已排队', failed: '原图失败', retrying: '正在恢复', warnings: '条警告' };
       for (const key of ['queued', 'failed', 'retrying', 'warnings']) {
-        el(key).textContent = `${state[key] || 0} ${key}`;
-        el(key).className = (key === 'failed' || key === 'warnings') && state[key] ? 'warning' : '';
+        el(key).textContent = `${state[key] || 0} ${statusLabels[key]}`;
+        el(key).className = key === 'failed' && state[key] ? 'danger' :
+          key === 'retrying' && state[key] ? 'info' : key === 'warnings' && state[key] ? 'warning' : '';
       }
+      const recovering = (state.retrying || 0) > 0 || ['cooldown', 'backoff', 'recovering'].includes(phase) ||
+        /backoff|Transient request errors|暂时性请求错误/i.test(rawReason);
+      el('recovery').hidden = !recovering;
+      el('recovery').textContent = (state.retrying || 0) > 0
+        ? `${state.retrying} 个原图任务正在等待或恢复。暂时错误不会立即计入失败。`
+        : '请求速度已自动降低，网络恢复后会继续。';
       if (patch.message !== undefined) el('message').textContent = patch.message;
       el('close').disabled = !state.finished;
       el('compact').textContent = promptStage
-        ? `${displayCompleted}/${displayTotal ?? '—'} prompts · ${state.processedConversations || 0}/${state.totalConversations ?? '—'} conversations · ${state.finished ? phase : promptPhase}`
-        : `${completed}/${total ?? '—'} · ${(speed / 1048576).toFixed(1)} MiB/s · ${state.finished ? phase : `ETA ${state.etaMs == null ? '—' : duration(state.etaMs)}`}`;
+        ? `${displayCompleted}/${displayTotal ?? '—'} 条提示词 · ${state.processedConversations || 0}/${state.totalConversations ?? '—'} 个会话 · ${state.finished ? phaseLabel : promptPhase}`
+        : `${completed}/${total ?? '—'} · ${(speed / 1048576).toFixed(1)} MiB/s · ${state.finished ? phaseLabel : `剩余 ${state.etaMs == null ? '—' : duration(state.etaMs)}`}`;
       if (Date.now() - lastChart >= 450 && !state.finished && !promptStage) {
         rates.push(speed); if (rates.length > 32) rates.shift(); lastChart = Date.now();
         const max = Math.max(1, ...rates);

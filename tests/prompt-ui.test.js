@@ -35,10 +35,10 @@ for (const stage of ['prompts', 'grouping', 'prompt-save']) {
     assert.equal(get('conversations').textContent, '399 / 400');
     assert.equal(get('groups').textContent, '121 / 2');
     assert.equal(get('selected-images').textContent, '2');
-    assert.equal(get('prompt-error-count').textContent, '1 prompt resolution errors');
-    assert.equal(get('prompt-save-error-count').textContent, '2 prompt save errors');
+    assert.equal(get('prompt-error-count').textContent, '1 条提示词未解析');
+    assert.equal(get('prompt-save-error-count').textContent, '2 个提示词文件保存失败');
     assert.doesNotMatch(get('compact').textContent, /MiB\/s|ETA/);
-    assert.equal(get('track').attributes['aria-label'], 'Image prompts resolved');
+    assert.equal(get('track').attributes['aria-label'], '提示词恢复进度');
     panel.destroy();
   });
 }
@@ -54,7 +54,7 @@ test('image stage restores transfer dashboard and retains separate prompt-save f
   assert.equal(get('count').textContent, '1');
   assert.equal(get('speed').textContent, '1.0 MiB/s');
   assert.match(get('compact').textContent, /MiB\/s/);
-  assert.equal(get('track').attributes['aria-label'], 'Image tasks processed');
+  assert.equal(get('track').attributes['aria-label'], '图片任务进度');
   panel.destroy();
 });
 
@@ -62,10 +62,10 @@ test('blocked prompt stage exposes failure and permits closing without claiming 
   const { panel, get } = panelFixture();
   panel.update({ stage: 'prompts', phase: 'blocked', finished: true,
     totalImages: 10, resolvedImages: 9, promptErrors: 1 });
-  assert.equal(get('phase').textContent, 'BLOCKED');
+  assert.equal(get('phase').textContent, '已阻止');
   assert.equal(get('close').disabled, false);
   assert.equal(get('percent').textContent, '90.0%');
-  assert.match(get('compact').textContent, /blocked/);
+  assert.match(get('compact').textContent, /已阻止/);
   assert.doesNotMatch(get('compact').textContent, /MiB\/s/);
   panel.destroy();
 });

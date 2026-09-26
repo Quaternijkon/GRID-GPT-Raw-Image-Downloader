@@ -542,8 +542,7 @@ function addBulkDownloadButton() {
   const btn = document.createElement('button');
   floatingButton = btn;
   btn.id = 'cgpt-bulk-btn';
-  const pageLabel = location.pathname.includes('/images') ? 'Images' : 'Folder';
-  btn.textContent = `⬇️ Bulk Download ${pageLabel} (+JSON)`;
+  btn.textContent = '⬇️ 导出原图与数据';
   btn.style.cssText = `
     position: fixed;
     max-width: calc(100vw - 48px);
@@ -579,7 +578,7 @@ function addBulkDownloadButton() {
       panel?.update({ message, phase, elapsedMs: Date.now() - panelStarted });
     };
     btn.disabled = true;
-    btn.textContent = '📁 Choose download location...';
+    btn.textContent = '📁 正在打开导出设置…';
 
     try {
       // === MUST REQUIRE USER TO CHOOSE LOCATION ===
@@ -608,7 +607,7 @@ function addBulkDownloadButton() {
         if (activeRun) return;
         panel.destroy(); floatingProgress = null;
         btn.style.display = '';
-        btn.textContent = `⬇️ Bulk Download ${location.pathname.startsWith('/images') ? 'Images' : 'Folder'} (+JSON)`;
+        btn.textContent = '⬇️ 导出原图与数据';
       } });
       floatingProgress = panel;
       btn.style.display = 'none';
@@ -625,7 +624,7 @@ function addBulkDownloadButton() {
         btn.disabled = false;
         return;
       }
-      status('Reading all image pages before assigning numbers.');
+      status('正在读取全部图片页面并建立稳定编号…');
 
       let rateLimitEvents = 0;
       let renderDownloadProgress = () => {};
@@ -664,7 +663,7 @@ function addBulkDownloadButton() {
         const collectPages = (path, label, mode = 'cursor') => imageLists.collect(client.apiFetch, path, {
           mode, checkActive: ensureSameView,
           onProgress: progress => {
-            status(`${label}: ${progress.unique} images · ${progress.pages} pages${progress.retrying ? ' · retrying' : ''}`);
+            status(`${label}：${progress.unique} 张图片 · ${progress.pages} 页${progress.retrying ? ' · 正在重试' : ''}`);
           }
         });
         const folderId = meta.folderId;
@@ -674,10 +673,10 @@ function addBulkDownloadButton() {
               .then(r => r.ok ? r.json() : {error: r.status}).then(d => ({ directoryPath: d })).catch(e => ({ directoryPath: {error: e.message} }))
           );
           apiCalls.push(
-            collectPages(`/backend-api/files/library/nodes?parent_directory_id=${folderId}&limit=100`, 'Library records', 'offset').then(d => ({ nodes: d })).catch(e => ({ nodes: {error: e.message} }))
+            collectPages(`/backend-api/files/library/nodes?parent_directory_id=${folderId}&limit=100`, '资料库记录', 'offset').then(d => ({ nodes: d })).catch(e => ({ nodes: {error: e.message} }))
           );
           apiCalls.push(
-            collectPages(`/backend-api/files/library/nodes?parent_directory_id=${folderId}&categories=image&limit=100`, 'Library images', 'offset').then(d => ({ imageNodes: d })).catch(e => ({ imageNodes: {error: e.message} }))
+            collectPages(`/backend-api/files/library/nodes?parent_directory_id=${folderId}&categories=image&limit=100`, '资料库图片', 'offset').then(d => ({ imageNodes: d })).catch(e => ({ imageNodes: {error: e.message} }))
           );
         }
         // General conversations list (gives create_time / update_time for folders/conversations)
@@ -688,11 +687,11 @@ function addBulkDownloadButton() {
         // Recent image records supply file IDs and possible explicit original links.
         if (isImagesPage) {
           apiCalls.push(
-            collectPages('/backend-api/my/recent/image_gen?limit=100', 'Gallery').then(d => ({ recentImageGen: d })).catch(e => ({ recentImageGen: {error: e.message} }))
+            collectPages('/backend-api/my/recent/image_gen?limit=100', '图库', 'cursor').then(d => ({ recentImageGen: d })).catch(e => ({ recentImageGen: {error: e.message} }))
           );
           // keep the old one as fallback (may 401)
           apiCalls.push(
-            collectPages('/backend-api/my/recent/uploaded_images?limit=50&images_app_only=true', 'Uploads').then(d => ({ recentUploadedImages: d })).catch(e => ({ recentUploadedImages: {error: e.message} }))
+            collectPages('/backend-api/my/recent/uploaded_images?limit=50&images_app_only=true', '上传记录').then(d => ({ recentUploadedImages: d })).catch(e => ({ recentUploadedImages: {error: e.message} }))
           );
         }
 
@@ -737,7 +736,7 @@ function addBulkDownloadButton() {
             collectionErrors: [], saveErrors: [] }, numbering: meta.numbering, pagination,
           metadataExportError: meta.exportError || null,
           queued: 0, failed: 0, images: [] }, reportName);
-        status(`No images downloaded: ${error.message}`, 'blocked');
+        status(`未开始图片下载：${error.message}`, 'blocked');
         panel.update({ finished: true, etaMs: null });
         return;
       }
@@ -985,7 +984,7 @@ function addBulkDownloadButton() {
         }
       };
       repaintPanel = renderDownloadProgress;
-      panel.update({ message: files.length ? `Original files ${files[0].sequence}–${files[files.length - 1].sequence} · ${results.skipped} earlier images skipped` : 'No images beyond the selected boundary.' });
+      panel.update({ message: files.length ? `正在处理原图 ${files[0].sequence}–${files[files.length - 1].sequence} · 已跳过前面的 ${results.skipped} 张` : '所选增量起点之后没有新图片。' });
       renderDownloadProgress();
       let outcomes;
       try {
@@ -1070,7 +1069,7 @@ function addBulkDownloadButton() {
         concurrency: control.snapshot().concurrency, peakActive: progress.peakActive,
         elapsedMs: Date.now() - downloadStartedAt, receivedBytes, responseBytes: meter.snapshot(files.length).bytes,
         rateLimitEvents, adaptive: control.summary() };
-      panel.update({ phase: 'finalizing', active: 0, etaMs: null, message: 'Writing the results report…' });
+      panel.update({ phase: 'finalizing', active: 0, etaMs: null, message: '正在写入结果报告和恢复检查点…' });
       if (savePrompts && results.images.length) {
         results.promptRetryCheckpoint = await persistPromptRetryCheckpoint(results, DOWNLOAD_FOLDER);
       }
@@ -1079,12 +1078,12 @@ function addBulkDownloadButton() {
       }
       await exportJson(results, reportName);
       btn.textContent = files.length
-        ? `${results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? '⚠️' : '⬇️'} ${results.queued} originals queued, ${results.failed} failed, ${results.warnings} with warnings. Numbers ${files[0].sequence}–${files[files.length - 1].sequence}; skipped ${results.skipped}.${savePrompts ? ` ${grouping.selectedGroupCount} prompt groups, ${grouping.selectedUnresolvedCount} images in 未解析, ${promptExport.saveErrors.length} TXT failures.` : ''} See download-results.json${meta.exportError ? ' (metadata export failed)' : ''}`
-        : `${meta.exportError ? '⚠️' : '✓'} No new images after ${afterSequence}; ${numbering.all.length} total. ${meta.exportError ? 'Metadata export failed; see results report.' : 'Metadata and results queued.'}`;
+        ? `${results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? '⚠️' : '✓'} ${results.queued} 张原图已排队，${results.failed} 张失败，${results.warnings} 张有警告。编号 ${files[0].sequence}–${files[files.length - 1].sequence}；跳过 ${results.skipped} 张。${savePrompts ? ` ${grouping.selectedGroupCount} 个提示词目录，${grouping.selectedUnresolvedCount} 张进入恢复区，${promptExport.saveErrors.length} 个 TXT 失败。` : ''}详见 download-results.json${meta.exportError ? '（元数据导出失败）' : ''}`
+        : `${meta.exportError ? '⚠️' : '✓'} 编号 ${afterSequence} 之后没有新图片；全库共 ${numbering.all.length} 张。${meta.exportError ? '元数据导出失败，请查看结果报告。' : '元数据和结果报告已排队。'}`;
       panel.update({ ...meter.snapshot(files.length), elapsedMs: Date.now() - panelStarted,
         completed: files.length, total: files.length, active: 0, finished: true,
         phase: results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? 'completed with issues' : 'complete',
-        reason: files.length ? control.snapshot().reason : 'No new images',
+        reason: files.length ? control.snapshot().reason : '没有新图片',
         queued: results.queued, failed: results.failed, warnings: results.warnings, retrying: 0,
         message: btn.textContent });
       btn.disabled = false;
@@ -1092,7 +1091,7 @@ function addBulkDownloadButton() {
       console.error('[ChatGPT Bulk] Error during bulk flow (button will be restored):', e);
       // Best effort restore so button isn't left stuck in loading/choose state
       if (btn) {
-        btn.textContent = `⚠️ Export incomplete: ${e.message}. Click to retry.`;
+        btn.textContent = `⚠️ 导出未完成：${e.message}。点击重新尝试。`;
         btn.disabled = false;
         panel?.update({ phase: 'error', finished: true, active: 0, etaMs: null, elapsedMs: Date.now() - panelStarted, message: e.message });
       }
@@ -1168,7 +1167,7 @@ async function chooseDownloadLocation() {
           *, *::before, *::after { box-sizing:border-box; }
           dialog {
             position:fixed; inset:0; margin:auto; padding:0;
-            width:min(480px, calc(100vw - 32px)); max-width:none;
+            width:min(620px, calc(100vw - 28px)); max-width:none;
             max-height:calc(100vh - 32px); max-height:calc(100dvh - 32px);
             overflow:auto; overscroll-behavior:contain;
             border:1px solid var(--dl-border); border-radius:20px;
@@ -1178,7 +1177,7 @@ async function chooseDownloadLocation() {
             text-align:left; letter-spacing:normal; direction:ltr;
           }
           dialog::backdrop { background:rgba(5,13,9,.65); }
-          .panel { padding:24px; }
+          .panel { padding:26px; }
           .header { display:flex; gap:12px; align-items:center; margin-bottom:18px; }
           .icon { display:grid; place-items:center; width:42px; height:42px; flex:none;
             color:var(--dl-accent); background:var(--dl-icon-bg); border-radius:12px; }
@@ -1187,8 +1186,19 @@ async function chooseDownloadLocation() {
           .eyebrow { margin:0 0 3px; color:var(--dl-muted); font-size:11px; letter-spacing:.06em; }
           p { margin:0; }
           .description, .hint { color:var(--dl-muted); }
-          .description { margin-bottom:20px; }
+          .description { margin-bottom:18px; }
           .hint { margin-top:6px; font-size:12px; }
+          h3 { margin:0;color:var(--dl-text);font-size:14px;font-weight:700; }
+          .section { margin-top:14px;padding:16px;border:1px solid var(--dl-separator);border-radius:14px;background:var(--dl-input); }
+          .section-head { display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px; }
+          .section-head .hint { margin:2px 0 0; }
+          .field { margin-top:14px; }
+          .field:first-child { margin-top:0; }
+          .field-grid { display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:14px;align-items:end; }
+          details > summary { cursor:pointer;color:var(--dl-text);font-weight:650;list-style:none; }
+          details > summary::-webkit-details-marker { display:none; }
+          details > summary::after { content:'＋';float:right;color:var(--dl-muted); }
+          details[open] > summary::after { content:'−'; }
           label { display:block; color:var(--dl-text); font-size:13px; font-weight:600; margin-bottom:7px; }
           input, button, select { font:inherit; letter-spacing:normal; }
           input, select {
@@ -1203,15 +1213,18 @@ async function chooseDownloadLocation() {
           input:focus-visible, button:focus-visible, select:focus-visible {
             outline:2px solid var(--dl-accent); outline-offset:3px;
           }
-          .parallel { display:flex; align-items:center; gap:18px; margin:20px 0; padding-top:18px;
-            border-top:1px solid var(--dl-separator); }
+          .parallel { display:flex; align-items:center; gap:18px; margin:14px 0 0; }
           .parallel > div { flex:1; }
           .parallel label { margin-bottom:0; }
           .parallel input { width:88px; flex:none; text-align:center; }
           .parallel select { width:150px; max-width:55%; flex:none; }
-          .prompt-option { margin:20px 0; padding-top:18px; border-top:1px solid var(--dl-separator); }
+          .prompt-option { margin-top:14px; }
           .prompt-toggle { width:100%; justify-content:space-between; }
           .prompt-toggle[aria-pressed="true"] { background:var(--dl-icon-bg); border-color:var(--dl-accent); color:var(--dl-accent); }
+          .recovery-list { display:grid;gap:9px; }
+          .recovery-list .prompt-toggle { justify-content:flex-start;text-align:left; }
+          .report-picker { margin-top:12px;padding-top:12px;border-top:1px solid var(--dl-separator); }
+          .report-picker input { min-height:40px;padding:7px 9px; }
           [hidden] { display:none!important; }
           button {
             appearance:none; display:inline-flex; justify-content:center; align-items:center;
@@ -1224,7 +1237,7 @@ async function chooseDownloadLocation() {
           .close { margin-left:auto; min-width:36px; min-height:36px; padding:6px;
             border-color:transparent; background:transparent; color:var(--dl-muted); }
           .close svg { width:18px; height:18px; }
-          .open-folder { width:100%; gap:8px; font-size:13px; }
+          .open-folder { width:100%; gap:8px; font-size:13px;margin-top:14px; }
           .open-folder svg { width:17px; height:17px; }
           .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:22px;
             padding-top:18px; border-top:1px solid var(--dl-separator); }
@@ -1234,10 +1247,13 @@ async function chooseDownloadLocation() {
             color:var(--dl-error); font-size:12px; overflow-wrap:anywhere; }
           .error:empty { display:none; }
           .footnote { margin-top:12px; color:var(--dl-muted); font-size:11px; text-align:center; }
-          @media (max-width:380px) {
+          @media (max-width:520px) {
             .panel { padding:18px; }
             .actions > button { flex:1; min-width:0; }
             h2 { font-size:18px; }
+            .field-grid { grid-template-columns:1fr; }
+            .parallel { align-items:flex-start;flex-direction:column;gap:8px; }
+            .parallel select,.parallel input { width:100%;max-width:none; }
           }
           @media (forced-colors:active) {
             dialog, input, button, select { border:1px solid CanvasText; }
@@ -1248,44 +1264,42 @@ async function chooseDownloadLocation() {
           <div class="panel">
             <header class="header">
               <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11m-4-4 4 4 4-4M4 15v5h16v-5"/></svg></span>
-              <div><p class="eyebrow">CHATGPT BULK DOWNLOADER</p><h2 id="bulk-dl-title">Download settings</h2></div>
-              <button type="button" class="close" id="bulk-dl-close" aria-label="Close download settings"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
+              <div><p class="eyebrow">GRID · CHATGPT 原图导出</p><h2 id="bulk-dl-title">创建导出任务</h2></div>
+              <button type="button" class="close" id="bulk-dl-close" aria-label="关闭导出设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
             </header>
-            <p id="bulk-dl-description" class="description">Save original images and their metadata together in a subfolder of your browser’s Downloads location.</p>
-            <label for="bulk-dl-folder">Download subfolder</label>
-            <input type="text" id="bulk-dl-folder" placeholder="chatgpt-images" autocomplete="off" spellcheck="false" aria-describedby="bulk-dl-folder-hint" />
-            <p id="bulk-dl-folder-hint" class="hint">Enter one folder name. It will be created if needed.</p>
-            <div class="parallel">
-              <div><label for="bulk-dl-after">Download after number</label><p id="bulk-dl-after-hint" class="hint">0 = all images. Enter 1600 to start at 1601.</p></div>
-              <input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" aria-describedby="bulk-dl-after-hint bulk-dl-numbering-note" />
-            </div>
-            <p id="bulk-dl-numbering-note" class="hint">Oldest image = 000001. For your first export with this numbering, use 0 in a new folder. Older versions used a different order.</p>
-            <div class="prompt-option">
-              <button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false" aria-describedby="bulk-dl-prompts-hint">保存提示词 <span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
-              <p id="bulk-dl-prompts-hint" class="hint">开启后串行读取会话，每次请求完成后等 10 秒；若收到 429，再额外等 10 秒（服务端要求更久时按其时间）。数百个会话可能需要一小时以上。相同提示词归入同一目录，无法解析的图片放入“未解析”。建议使用新目录。</p>
-            </div>
-            <div class="prompt-option">
-              <label for="bulk-dl-retry-report">仅重试上次失败的提示词（可选）</label>
-              <button type="button" class="prompt-toggle" id="bulk-dl-retry-images" hidden></button>
-              <button type="button" class="prompt-toggle" id="bulk-dl-retry-saved" hidden></button>
-              <input type="file" id="bulk-dl-retry-report" />
-              <p class="hint">插件会自动保存本页最近一次未解析清单，并在这里提供一键重试；也可手动选择旧下载结果或 prompt-retry-results JSON。重试不重新下载图片。</p>
-            </div>
-            <div class="parallel">
-              <div><label for="bulk-dl-mode">Concurrency</label><p id="bulk-dl-parallel-hint" class="hint">Auto probes capacity and backs off when congested.</p></div>
-              <select id="bulk-dl-mode" aria-describedby="bulk-dl-parallel-hint"><option value="auto">Auto</option><option value="manual">Manual</option></select>
-            </div>
-            <div class="parallel" id="bulk-dl-manual" hidden>
-              <div><label for="bulk-dl-concurrency">Manual parallel downloads</label><p class="hint">1–12 images at once.</p></div>
-              <input type="number" id="bulk-dl-concurrency" min="1" max="12" step="1" value="6" />
-            </div>
-            <button type="button" class="open-folder" id="bulk-dl-show"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3z"/></svg>Open Downloads folder</button>
+            <p id="bulk-dl-description" class="description">导出当前图库或资料库目录中的原图。所有处理都在浏览器本地完成。</p>
+            <section class="section">
+              <div class="section-head"><div><h3>新建导出</h3><p class="hint">设置输出目录、增量起点和提示词整理方式。</p></div></div>
+              <div class="field"><label for="bulk-dl-folder">下载子目录</label>
+                <input type="text" id="bulk-dl-folder" placeholder="chatgpt-images" autocomplete="off" spellcheck="false" aria-describedby="bulk-dl-folder-hint" />
+                <p id="bulk-dl-folder-hint" class="hint">位于浏览器默认“下载”目录中；不存在时自动创建。</p></div>
+              <div class="field field-grid"><div><label for="bulk-dl-after">从编号之后继续</label><p id="bulk-dl-after-hint" class="hint">0 表示全部下载；填写 1600 将从 001601 开始。</p></div>
+                <input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" aria-describedby="bulk-dl-after-hint bulk-dl-numbering-note" /></div>
+              <p id="bulk-dl-numbering-note" class="hint">最旧图片编号为 000001。首次使用当前编号规则时，请在新目录中填写 0。</p>
+              <div class="prompt-option"><button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false" aria-describedby="bulk-dl-prompts-hint"><span>同时恢复并整理提示词</span><span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
+                <p id="bulk-dl-prompts-hint" class="hint">会话按 10 秒间隔串行读取；遇到限流自动等待。图片按相同提示词归入稳定目录，暂时未解析项进入独立恢复区。</p></div>
+            </section>
+            <section class="section">
+              <div class="section-head"><div><h3>恢复失败任务</h3><p class="hint">只处理失败项，不重复下载已经成功的图片。</p></div></div>
+              <div class="recovery-list"><button type="button" class="prompt-toggle" id="bulk-dl-retry-images" hidden></button>
+                <button type="button" class="prompt-toggle" id="bulk-dl-retry-saved" hidden></button></div>
+              <details class="report-picker"><summary>从结果报告恢复</summary>
+                <div class="field"><label for="bulk-dl-retry-report">选择 download-results 或 retry-results JSON</label><input type="file" id="bulk-dl-retry-report" />
+                  <p class="hint">插件会自动判断应重试原图还是提示词，并保持原有编号和目录布局。</p></div></details>
+            </section>
+            <details class="section"><summary>性能设置（推荐保持自动）</summary>
+              <div class="parallel"><div><label for="bulk-dl-mode">图片下载并发</label><p id="bulk-dl-parallel-hint" class="hint">自动模式会探测速度，并在限流、超时或内存压力下主动降速。</p></div>
+                <select id="bulk-dl-mode" aria-describedby="bulk-dl-parallel-hint"><option value="auto">自动调节</option><option value="manual">手动设置</option></select></div>
+              <div class="parallel" id="bulk-dl-manual" hidden><div><label for="bulk-dl-concurrency">并发数量</label><p class="hint">可设置 1–12。</p></div>
+                <input type="number" id="bulk-dl-concurrency" min="1" max="12" step="1" value="6" /></div>
+            </details>
+            <button type="button" class="open-folder" id="bulk-dl-show"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3z"/></svg>打开浏览器下载目录</button>
             <p id="bulk-dl-error" class="error" role="status" aria-live="polite"></p>
             <footer class="actions">
-              <button type="button" id="bulk-dl-cancel">Cancel</button>
-              <button type="button" class="primary" id="bulk-dl-ok">Start download</button>
+              <button type="button" id="bulk-dl-cancel">取消</button>
+              <button type="button" class="primary" id="bulk-dl-ok">开始导出</button>
             </footer>
-            <p class="footnote">Images and metadata will be saved together.</p>
+            <p class="footnote">原图、提示词和结果报告会保存在对应的输出目录中。</p>
           </div>
         </dialog>
       `;
@@ -1317,7 +1331,7 @@ async function chooseDownloadLocation() {
       let savedImageRetryPlan = null, useSavedImageRetry = false;
       let manualImageRetryPlan = null;
       const setRetryControls = retryOnly => {
-        root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '仅重试提示词' : 'Start download';
+        root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '开始恢复提示词' : '开始导出';
         afterInput.disabled = retryOnly;
         promptsButton.disabled = retryOnly;
         modeInput.disabled = retryOnly;
@@ -1462,7 +1476,7 @@ async function chooseDownloadLocation() {
           const after = retryReport || useSavedImageRetry ? 0 : imageNumbering.parseBoundary(afterInput.value);
           const concurrency = modeInput.value === 'auto' ? 'auto' : Number(parallelInput.value);
           if (!retryReport && !useSavedImageRetry && concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
-            throw new Error('Choose a whole number of parallel downloads from 1 to 12');
+            throw new Error('手动并发数量必须是 1–12 的整数。');
           }
           // Validate the imported report and target directory before persisting
           // settings or making any authenticated conversation requests.
@@ -1517,7 +1531,7 @@ function syncBulkButton() {
   }
   addBulkDownloadButton();
   if (floatingButton && !activeRun && buttonRoute !== location.href) {
-    floatingButton.textContent = `⬇️ Bulk Download ${location.pathname.startsWith('/images') ? 'Images' : 'Folder'} (+JSON)`;
+    floatingButton.textContent = '⬇️ 导出原图与数据';
     buttonRoute = location.href;
   }
 }

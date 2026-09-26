@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.19 — 2026-09-27
+
+- Redesigned the settings dialog in Chinese with separate New Export, Failure Recovery and Performance sections. Automatically discovered image/prompt recovery actions are prominent; manual result import is placed in a disclosure section.
+- Localized and clarified the progress dashboard. Prompt-resolution errors, prompt-file errors, terminal original failures, active recovery, queued downloads and warnings now have separate labels and visual states.
+- Transient network recovery gets an explicit notice explaining that tasks are waiting and have not become terminal failures. Common adaptive-controller reasons are translated into readable status text.
+- Improved responsive behavior for narrow windows while keeping the progress panel scrollable and collapsible.
+
 ## 1.9.18 — 2026-09-27
 
 - Prompt directories are now content-addressed from the full normalized prompt (`p-<hash>-<length>`). A prompt receives the same directory whether it succeeds initially or is recovered later, independent of other temporarily unresolved prompts.

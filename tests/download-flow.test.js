@@ -191,7 +191,7 @@ test('content → original resolver → worker preserves bytes and exports pixel
   assert.deepEqual(Buffer.from(image.url.split(',')[1], 'base64'), imageBytes);
   assert.match(image.filename, /^original-quality-test\/000001-sample.png$/);
   assert.equal(button.disabled, false);
-  assert.match(button.textContent, /1 originals queued, 0 failed/);
+  assert.match(button.textContent, /1 张原图已排队，0 张失败/);
 });
 
 test('Chrome download errors are visible and never counted as success', async () => {
@@ -199,7 +199,7 @@ test('Chrome download errors are visible and never counted as success', async ()
   assert.equal(report.queued, 0);
   assert.equal(report.failed, 1);
   assert.equal(report.images[0].error, 'Download rejected by browser');
-  assert.match(button.textContent, /0 originals queued, 1 failed/);
+  assert.match(button.textContent, /0 张原图已排队，1 张失败/);
   assert.equal(button.disabled, false);
 });
 
@@ -278,7 +278,7 @@ test('boundary equal to total produces no image downloads and clear no-new-image
   assert.equal(report.queued, 0);
   assert.equal(report.selected, 0);
   assert.equal(downloads.filter(d => d.url.startsWith('data:image/')).length, 0);
-  assert.match(button.textContent, /No new images after 100/);
+  assert.match(button.textContent, /编号 100 之后没有新图片/);
 });
 
 const promptFixtureRecords = [
