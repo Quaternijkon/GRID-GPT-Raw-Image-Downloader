@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.17 — 2026-09-26
+
+- Preserve transient classification when the original resolver exhausts its three internal endpoint rounds. Previously the adaptive controller saw transient errors, but the task wrapper received an unclassified exception and immediately counted the image as permanently failed.
+- After the normal endpoint rounds, timeout/network/HTTP 408/429/5xx failures enter up to twelve serialized recovery rounds with 10/20/40-second delays and a 60-second cap. Only one recovery attempt runs at a time, preventing a burst when connectivity returns.
+- Images in transient recovery remain `retrying/backoff` and do not increment the terminal failed counter. Reports retain cumulative retrieval attempts, safe error diagnostics and the number of recovery rounds.
+- An already-running 1.9.16 export keeps its in-memory implementation and is not interrupted; 1.9.17 applies after the extension and page are reloaded.
+
 ## 1.9.16 — 2026-09-26
 
 - Persist a minimal unresolved-prompt checkpoint per ChatGPT Images/Library route. The next settings dialog exposes a built-in one-click retry, so ordinary users do not need to locate or import a result JSON; manual import remains available as a fallback.

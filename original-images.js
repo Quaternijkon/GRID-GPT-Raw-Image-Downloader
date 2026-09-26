@@ -348,7 +348,8 @@
             return { ...await fetchCandidate(source), retrievalAttempts: attempt, retrievalErrors: errors };
           } catch (error) {
             errors.push({ attempt, source: source.origin, phase: error.phase || 'resolve',
-              status: error.status || null, message: error.message });
+              status: error.status || null, message: error.message,
+              retryable: error.retryable === true, retryAfterMs: error.retryAfterMs || 0 });
             if (error.retryable) {
               transient = true;
               retryAfterMs = Math.max(retryAfterMs, error.retryAfterMs || 0);
@@ -363,6 +364,8 @@
       const error = new Error(`Original unavailable; no thumbnail saved. ${errors.map(e => `Attempt ${e.attempt}: ${e.source}: ${e.message}`).join('; ') || 'No original download link or resolvable file ID.'}`);
       error.retrievalAttempts = attemptsMade;
       error.details = errors;
+      error.retryable = errors.some(detail => detail.retryable === true);
+      error.retryAfterMs = Math.max(0, ...errors.map(detail => detail.retryAfterMs || 0));
       throw error;
     }
     return { apiFetch, resolve };

@@ -726,6 +726,62 @@ function addBulkDownloadButton() {
           elapsedMs: Date.now() - panelStarted, etaMs: adaptive.coolingDown ? null : telemetry.etaMs,
           queued: results.queued, failed: results.failed, warnings: results.warnings, retrying: retrying.size });
       };
+      const MAX_ORIGINAL_RECOVERY_ROUNDS = 12;
+      let recoveryTail = Promise.resolve();
+      const waitWhileActive = async delayMs => {
+        const deadline = Date.now() + delayMs;
+        while (Date.now() < deadline) {
+          ensureSameView();
+          await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+        }
+        ensureSameView();
+      };
+      const serializedRecovery = async (work, delayMs) => {
+        const previous = recoveryTail;
+        let release;
+        recoveryTail = new Promise(resolve => { release = resolve; });
+        await previous;
+        try {
+          await waitWhileActive(delayMs);
+          return await work();
+        } finally { release(); }
+      };
+      const resolveOriginalWithRecovery = async (entry, index) => {
+        let recoveryRounds = 0, totalAttempts = 0, recoveryDelayMs = 0;
+        const retrievalErrors = [];
+        for (;;) {
+          try {
+            const work = () => client.resolve(entry, {
+              onRetry: () => {
+                retrying.add(index);
+                renderDownloadProgress();
+              }
+            });
+            const asset = recoveryRounds
+              ? await serializedRecovery(work, recoveryDelayMs)
+              : await work();
+            totalAttempts += asset.retrievalAttempts || 1;
+            retrievalErrors.push(...(asset.retrievalErrors || []));
+            return { ...asset, retrievalAttempts: totalAttempts,
+              retrievalErrors, recoveryRounds };
+          } catch (error) {
+            totalAttempts += error?.retrievalAttempts || 1;
+            retrievalErrors.push(...(error?.details || []));
+            if (error?.retryable !== true || recoveryRounds >= MAX_ORIGINAL_RECOVERY_ROUNDS) {
+              error.retrievalAttempts = totalAttempts;
+              error.details = retrievalErrors;
+              error.recoveryRounds = recoveryRounds;
+              throw error;
+            }
+            recoveryRounds++;
+            recoveryDelayMs = Math.max(error.retryAfterMs || 0,
+              Math.min(60000, 10000 * 2 ** Math.min(3, recoveryRounds - 1)));
+            retrying.add(index);
+            control.congest('Transient request errors', Date.now() + recoveryDelayMs);
+            renderDownloadProgress();
+          }
+        }
+      };
       repaintPanel = renderDownloadProgress;
       panel.update({ message: files.length ? `Original files ${files[0].sequence}–${files[files.length - 1].sequence} · ${results.skipped} earlier images skipped` : 'No images beyond the selected boundary.' });
       renderDownloadProgress();
@@ -742,12 +798,7 @@ function addBulkDownloadButton() {
               promptSource: promptSource(entry.prompt) } : {}) };
           try {
             ensureSameView();
-            const asset = await client.resolve(entry, {
-              onRetry: () => {
-                retrying.add(index);
-                renderDownloadProgress();
-              }
-            });
+            const asset = await resolveOriginalWithRecovery(entry, index);
             receivedBytes += asset.blob.size;
             const name = originalImages.filename(entry.name, asset.blob.type, entry.sequence - 1, imageNumbering.WIDTH);
             Object.assign(record, {
@@ -756,7 +807,8 @@ function addBulkDownloadButton() {
               sha256: await originalImages.fingerprint(asset.blob),
               source: asset.source, verification: asset.verification,
               validation: asset.validation, warnings: [...record.warnings, ...(asset.warnings || [])],
-              retrievalAttempts: asset.retrievalAttempts, retrievalErrors: asset.retrievalErrors
+              retrievalAttempts: asset.retrievalAttempts, retrievalErrors: asset.retrievalErrors,
+              recoveryRounds: asset.recoveryRounds
             });
             // Preserve exact bytes: no Canvas conversion, resizing or guessed extensions.
             const imageDataUrl = await blobToDataUrl(asset.blob);
@@ -779,6 +831,7 @@ function addBulkDownloadButton() {
             record.error = error?.message || String(error);
             record.retrievalAttempts = error?.retrievalAttempts || record.retrievalAttempts;
             record.retrievalErrors = error?.details || record.retrievalErrors;
+            record.recoveryRounds = error?.recoveryRounds || record.recoveryRounds || 0;
             results.failed++;
           } finally {
             retrying.delete(index);

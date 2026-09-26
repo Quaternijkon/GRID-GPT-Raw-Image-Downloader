@@ -379,6 +379,8 @@ test('permanent CORS-like fetch errors stop after three resolution rounds', asyn
   await assert.rejects(c.resolve(entry()), error => {
     assert.equal(error.retrievalAttempts, 3);
     assert.equal(error.details.length, 6);
+    assert.equal(error.retryable, true);
+    assert.ok(error.details.every(detail => detail.retryable === true));
     return /no thumbnail saved/.test(error.message);
   });
   assert.equal(calls, 6);
