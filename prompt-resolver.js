@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const RULE_VERSION = 'reference-or-text-image-rounds-v3-nonimage-attachments';
-  const ADAPTER_VERSION = 'chatgpt-mapping-v7';
+  const ADAPTER_VERSION = 'chatgpt-mapping-v8';
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const string = value => typeof value === 'string' && value.length ? value : null;
   const fail = (code, message, diagnostic) => {
@@ -72,10 +72,10 @@
         (content.name == null || typeof content.name === 'string') && typeof content.text === 'string';
     }
     if (content.content_type === 'tether_browsing_display') {
-      return keysOnly(content, ['content_type', 'result', 'summary', 'assets', 'tether_id']) &&
-        (content.result == null || typeof content.result === 'string') &&
-        (content.summary == null || typeof content.summary === 'string') &&
-        (content.tether_id == null || typeof content.tether_id === 'string') && Array.isArray(content.assets);
+      // This is a tool-rendering envelope, not a user message or image output.
+      // Historical payload fields changed between strings, arrays and objects;
+      // the exact content type and closed top-level key set identify it safely.
+      return keysOnly(content, ['content_type', 'result', 'summary', 'assets', 'tether_id']);
     }
     if (content.content_type === 'thoughts') {
       return keysOnly(content, ['content_type', 'thoughts', 'source_analysis_msg_id']) &&

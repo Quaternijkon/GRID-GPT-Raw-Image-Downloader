@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.14 — 2026-09-26
+
+- The second targeted pass recovered and wrote 60 numbered prompt sidecars. Of 40 remaining images, 30 were still blocked by historical field-type variations inside the exact `tether_browsing_display` tool envelope.
+- Recognize that non-prompt tool envelope by exact content type and a closed top-level key set, without assuming its historical fields are always strings or arrays. It still cannot become user prompt text or an image output.
+- The second pass made 43 conversation requests with no HTTP 429 and no original-image download. The third pass imports only the second report's 40 remaining failures.
+
 ## 1.9.13 — 2026-09-26
 
 - Used the first live prompt-only retry diagnostics to classify `tether_browsing_display` and `system_error` tool content as non-prompt events with exact schema checks.

@@ -159,6 +159,7 @@ test('explicit non-image assistant/tool schemas do not finish a waiting round', 
     { content_type: 'execution_output', text: 'hidden execution' }
     ,{ content_type: 'system_error', name: 'tool_error', text: 'hidden error' }
     ,{ content_type: 'tether_browsing_display', result: 'hidden result', summary: 'hidden summary', assets: [], tether_id: 't' }
+    ,{ content_type: 'tether_browsing_display', result: { hidden: true }, summary: ['hidden'], assets: { legacy: true }, tether_id: 7 }
   ];
   for (const role of ['assistant', 'tool']) for (const content of contents) {
     const other = node('other', 'u', role, []);
