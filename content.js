@@ -130,6 +130,19 @@ async function requestDownload(url, name, folder, { fallbackName, onAccepted, gr
   return response.downloadId;
 }
 
+async function requestPromptTextDownload(url, name, folder, options, checkActive = () => {}) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    checkActive();
+    try { return { downloadId: await requestDownload(url, name, folder, options), attempts: attempt }; }
+    catch (error) {
+      lastError = error;
+      if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+    }
+  }
+  throw Object.assign(lastError || new Error('Prompt text download failed'), { saveAttempts: 3 });
+}
+
 function blobToDataUrl(blob) {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -153,6 +166,94 @@ function promptSource(record) {
     branchPath: record.branchPath, ruleVersion: record.ruleVersion, adapterVersion: record.adapterVersion };
 }
 
+const AUTO_PROMPT_RETRY_CODES = new Set(['target_not_found', 'response_shape', 'json_error', 'conversation_shape']);
+
+function summarizePromptErrors(errors) {
+  const groups = new Map();
+  for (const error of errors || []) {
+    const context = { code: error.code || 'prompt_unresolved' };
+    for (const key of ['phase', 'httpStatus', 'bearerSent', 'authRetried']) {
+      if (error[key] !== undefined) context[key] = error[key];
+    }
+    const key = JSON.stringify(context);
+    if (!groups.has(key)) groups.set(key, { ...context, affectedImages: 0, conversations: new Set() });
+    const group = groups.get(key);
+    group.affectedImages++;
+    if (error.conversationId) group.conversations.add(error.conversationId);
+  }
+  return [...groups.values()].map(({ conversations, ...group }) => ({
+    ...group, affectedConversations: conversations.size
+  })).sort((a, b) => b.affectedImages - a.affectedImages);
+}
+
+async function collectPromptsWithRecovery(entries, options) {
+  const primary = await promptConversations.collect(entries, options);
+  if (options.autoRecovery === false) return { ...primary, autoRetryImages: 0, autoRetryConversations: 0 };
+  const retryEntries = entries.filter((entry, index) =>
+    primary.records[index]?.status === 'unresolved' &&
+    AUTO_PROMPT_RETRY_CODES.has(primary.records[index]?.error?.code));
+  if (!retryEntries.length) return { ...primary, autoRetryImages: 0, autoRetryConversations: 0 };
+  options.checkActive?.();
+  options.onAutoRetry?.({ images: retryEntries.length,
+    conversations: new Set(retryEntries.map(entry => entry.conversationId || entry.conversation_id)).size });
+  // Keep the same completion-to-next-request spacing across the pass boundary.
+  await new Promise(resolve => setTimeout(resolve, primary.requestGapMs || 10000));
+  options.checkActive?.();
+  const baseResolved = primary.resolvedImages || 0;
+  const retried = await promptConversations.collect(retryEntries, {
+    ...options,
+    onProgress: update => options.onProgress?.({ ...update, autoRetry: true,
+      totalImages: entries.length, resolvedImages: baseResolved + update.resolvedImages })
+  });
+  const retryIds = new Set(retryEntries.map(entry => entry.fileId));
+  const byId = new Map(retried.records.map(record => [record?.fileId, record]));
+  const records = primary.records.map(record => retryIds.has(record?.fileId) ? byId.get(record.fileId) || record : record);
+  const errors = [...(primary.errors || []).filter(error => !retryIds.has(error.fileId)), ...(retried.errors || [])];
+  const resolvedImages = records.filter(record => record?.status === 'resolved').length;
+  return { ...primary, records, errors, errorSummary: summarizePromptErrors(errors), resolvedImages,
+    complete: errors.length === 0 && resolvedImages === entries.length,
+    requestCount: (primary.requestCount || 0) + (retried.requestCount || 0),
+    rateLimitCount: (primary.rateLimitCount || 0) + (retried.rateLimitCount || 0),
+    rateLimitEpisodes: (primary.rateLimitEpisodes || 0) + (retried.rateLimitEpisodes || 0),
+    peakRequests: Math.max(primary.peakRequests || 0, retried.peakRequests || 0),
+    lastServerRetryAfterMs: retried.lastServerRetryAfterMs ?? primary.lastServerRetryAfterMs,
+    lastFallbackCooldownMs: retried.lastFallbackCooldownMs || primary.lastFallbackCooldownMs,
+    cooldownSource: retried.cooldownSource || primary.cooldownSource,
+    autoRetryImages: retryEntries.length, autoRetryConversations: retried.conversationCount,
+    autoRetryResolvedImages: retried.resolvedImages, autoRetryRequestCount: retried.requestCount };
+}
+
+function promptRetryCheckpoint(results, folder) {
+  const images = (results.images || []).filter(item =>
+    (item.promptStatus === 'unresolved' || item.saveStatus === 'failed') &&
+    (item.status === undefined || item.status === 'queued')).map(item => {
+      const conversationId = item.conversationId || item.promptSource?.conversationId;
+      const imageRelativePath = item.imageRelativePath || item.relativePath ||
+        `${folder}/未解析/${item.name || item.originalName || ''}`;
+      if (!conversationId || !item.fileId || !Number.isSafeInteger(item.sequence)) return null;
+      return { sequence: item.sequence, fileId: item.fileId, conversationId, imageRelativePath,
+        promptStatus: 'unresolved', promptError: item.promptError ||
+          { code: 'prompt_save_failed', message: item.saveError || 'Prompt file was not saved' },
+        ...(item.saveStatus === 'failed' ? { saveStatus: 'failed', saveError: item.saveError } : {}) };
+    }).filter(Boolean);
+  return { schemaVersion: 1, kind: 'prompt-retry-results', extensionVersion,
+    createdAt: new Date().toISOString(), sourceReportCreatedAt: results.createdAt || null,
+    sourceExtensionVersion: results.extensionVersion, page: results.page, scope: results.scope,
+    folder, images };
+}
+
+async function persistPromptRetryCheckpoint(results, folder) {
+  try {
+    const checkpoint = promptRetryCheckpoint(results, folder);
+    const processedFileIds = Array.isArray(results.processedFileIds) ? results.processedFileIds :
+      (results.images || []).map(item => item.fileId).filter(Boolean);
+    const response = await sendToWorker({ action: 'savePromptRetryCheckpoint', checkpoint, processedFileIds });
+    return { saved: response.status === 'saved', count: response.count ?? checkpoint.images.length };
+  } catch (error) {
+    return { saved: false, count: 0, error: error.message };
+  }
+}
+
 async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status }) {
   const startedAt = Date.now();
   const client = originalImages.createClient();
@@ -160,15 +261,17 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
   status(`仅重试上次失败的 ${count} 张图片，涉及 ${plan.conversationCount} 个会话…`, 'prompts');
   panel.update({ stage: 'prompts', totalImages: count, totalConversations: plan.conversationCount,
     processedConversations: 0, resolvedImages: 0, promptErrors: count, etaMs: null });
-  const collected = await promptConversations.collect(plan.entries, {
-    client, resolver: promptResolver, checkActive: ensureSameView,
+  const collected = await collectPromptsWithRecovery(plan.entries, {
+    client, resolver: promptResolver, checkActive: ensureSameView, autoRecovery: false,
     onProgress: update => {
       const wait = update.retryInMs > 0 ? ` · 429 后等待 ${Math.ceil(update.retryInMs / 1000)} 秒` : '';
       panel.update({ stage: 'prompts', totalImages: count, totalConversations: plan.conversationCount,
         processedConversations: update.processedConversations, resolvedImages: update.resolvedImages,
         promptErrors: update.errors.length, etaMs: null,
-        message: `定向重试会话 ${update.processedConversations}/${plan.conversationCount} · 已恢复 ${update.resolvedImages}/${count}${wait}` });
-    }
+        message: `${update.autoRetry ? '自动复核暂时缺失项' : '定向重试会话'} ${update.processedConversations}/${update.autoRetry ? update.conversationCount : plan.conversationCount} · 已恢复 ${update.resolvedImages}/${count}${wait}` });
+    },
+    onAutoRetry: update => panel.update({ stage: 'prompts', etaMs: null,
+      message: `自动复核 ${update.images} 张可能暂时缺失的图片提示词（${update.conversations} 个会话）…` })
   });
   ensureSameView();
   const results = { schemaVersion: 1, kind: 'prompt-retry-results', extensionVersion,
@@ -176,6 +279,8 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
     sourceExtensionVersion: plan.sourceExtensionVersion, page: plan.page, scope: plan.scope,
     folder, selectedImages: count, conversationCount: plan.conversationCount,
     requestCount: collected.requestCount, rateLimitCount: collected.rateLimitCount,
+    autoRetryImages: collected.autoRetryImages, autoRetryConversations: collected.autoRetryConversations,
+    autoRetryResolvedImages: collected.autoRetryResolvedImages, autoRetryRequestCount: collected.autoRetryRequestCount,
     requestGapMs: collected.requestGapMs, recovered: 0, unresolved: 0, saveFailed: 0,
     imageDownloadsRequested: 0, collectionErrors: collected.errors, images: [] };
   for (let i = 0; i < count; i++) {
@@ -191,12 +296,15 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
       item.promptRelativePath = `${folder}/未解析/${name}`;
       item.promptSource = promptSource(record);
       try {
-        item.promptDownloadId = await requestDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(record.cumulativePrompt),
-          name, folder, { kind: 'retry-prompt', unresolved: true, retrySequence: entry.sequence, conflictAction: 'overwrite' });
+        const saved = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(record.cumulativePrompt),
+          name, folder, { kind: 'retry-prompt', unresolved: true, retrySequence: entry.sequence, conflictAction: 'overwrite' }, ensureSameView);
+        item.promptDownloadId = saved.downloadId;
+        item.saveAttempts = saved.attempts;
         item.saveStatus = 'queued';
         results.recovered++;
       } catch (error) {
-        item.saveStatus = 'failed'; item.saveError = error.message; results.saveFailed++;
+        item.saveStatus = 'failed'; item.saveError = error.message;
+        item.saveAttempts = error.saveAttempts || 3; results.saveFailed++;
       }
     } else results.unresolved++;
     results.images.push(item);
@@ -206,6 +314,7 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
   }
   ensureSameView();
   const reportName = `chatgpt-prompt-retry-results-${Date.now()}.json`;
+  results.retryCheckpoint = await persistPromptRetryCheckpoint(results, folder);
   await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)), reportName, folder);
   panel.update({ stage: 'prompt-save', phase: results.unresolved || results.saveFailed ? 'completed with issues' : 'complete',
     finished: true, totalImages: count, resolvedImages: results.recovered,
@@ -462,7 +571,7 @@ function addBulkDownloadButton() {
         try {
           if (!promptResolver || !promptGroups || !promptConversations) throw new Error('Prompt helpers are unavailable; reload the extension and this page.');
           let collected;
-          try { collected = await promptConversations.collect(numbering.all, {
+          try { collected = await collectPromptsWithRecovery(numbering.all, {
             // Reuse the run's authenticated client for paced conversation reads.
             client, resolver: promptResolver, checkActive: ensureSameView,
             onProgress: update => {
@@ -476,8 +585,10 @@ function addBulkDownloadButton() {
               panel.update({ stage: 'prompts', processedConversations: update.processedConversations,
                 totalConversations: update.conversationCount, resolvedImages: update.resolvedImages,
                 totalImages: numbering.all.length, promptErrors: update.errors || [], etaMs: null,
-                message: `恢复会话 ${update.processedConversations || 0}/${update.conversationCount || 0} · 提示词 ${update.resolvedImages || 0}/${numbering.all.length}${waiting}${pacing}${lowerBound}${detail ? ` · ${detail}` : ''}` });
-            }
+                message: `${update.autoRetry ? '自动复核暂时缺失项' : '恢复会话'} ${update.processedConversations || 0}/${update.conversationCount || 0} · 提示词 ${update.resolvedImages || 0}/${numbering.all.length}${waiting}${pacing}${lowerBound}${detail ? ` · ${detail}` : ''}` });
+            },
+            onAutoRetry: update => panel.update({ stage: 'prompts', etaMs: null,
+              message: `自动复核 ${update.images} 张可能暂时缺失的图片提示词（${update.conversations} 个会话）…` })
           }); } catch (_) {
             ensureSameView(); // Navigation/cancellation must never become fallback downloads.
             const errors = numbering.all.map(entry => ({ fileId: entry.fileId,
@@ -492,6 +603,10 @@ function addBulkDownloadButton() {
             resolvedImages: collected.resolvedImages, totalImages: numbering.all.length,
             requestCount: collected.requestCount, rateLimitCount: collected.rateLimitCount,
             rateLimitEpisodes: collected.rateLimitEpisodes,
+            autoRetryImages: collected.autoRetryImages,
+            autoRetryConversations: collected.autoRetryConversations,
+            autoRetryResolvedImages: collected.autoRetryResolvedImages,
+            autoRetryRequestCount: collected.autoRetryRequestCount,
             deferredConversations: collected.deferredConversations,
             stopped: collected.stopped, stopReason: collected.stopReason,
             requestGapMs: collected.requestGapMs, targetConcurrency: collected.targetConcurrency,
@@ -523,6 +638,18 @@ function addBulkDownloadButton() {
             total: files.length, totalImages: numbering.all.length, resolvedImages: numbering.all.length - grouping.unresolvedCount,
             promptErrors: grouping.unresolvedCount,
             message: `全库 ${numbering.all.length} 张 · ${grouping.groupCount} 个提示词组 · 本次 ${files.length} 张 / ${grouping.selectedGroupCount} 组 · ${grouping.selectedUnresolvedCount} 张放入“未解析”` });
+          // Save recoverable identities before the potentially long image stage.
+          // The final checkpoint is reconciled with actual queued image results.
+          if (files.length) promptExport.retryCheckpoint = await persistPromptRetryCheckpoint({
+              extensionVersion, createdAt: new Date().toISOString(), page: startUrl, scope,
+              processedFileIds: files.map(entry => entry.fileId),
+              images: files.filter(entry => entry.unresolved).map(entry => ({
+                sequence: entry.sequence, fileId: entry.fileId,
+                conversationId: entry.prompt?.conversationId,
+                imageRelativePath: `${DOWNLOAD_FOLDER}/未解析/${originalImages.filename(entry.name, 'image/png', entry.sequence - 1, imageNumbering.WIDTH)}`,
+                promptStatus: 'unresolved', promptError: entry.promptError
+              }))
+            }, DOWNLOAD_FOLDER);
         } catch (error) {
           ensureSameView();
           promptExport.status = 'blocked';
@@ -549,11 +676,14 @@ function addBulkDownloadButton() {
           const saved = { groupNumber: group.groupNumber, groupName: group.groupName,
             relativePath: `${DOWNLOAD_FOLDER}/${group.groupName}/prompt.txt`, status: 'failed' };
           try {
-            saved.downloadId = await requestDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
-              'prompt.txt', DOWNLOAD_FOLDER, { groupNumber: group.groupNumber, kind: 'prompt', conflictAction: 'overwrite' });
+            const receipt = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
+              'prompt.txt', DOWNLOAD_FOLDER, { groupNumber: group.groupNumber, kind: 'prompt', conflictAction: 'overwrite' }, ensureSameView);
+            saved.downloadId = receipt.downloadId;
+            saved.attempts = receipt.attempts;
             saved.status = 'queued';
           } catch (error) {
             saved.error = error.message;
+            saved.attempts = error.saveAttempts || 3;
             promptExport.saveErrors.push({ groupNumber: group.groupNumber, error: error.message });
           }
           promptExport.saves.push(saved);
@@ -682,6 +812,9 @@ function addBulkDownloadButton() {
         elapsedMs: Date.now() - downloadStartedAt, receivedBytes, responseBytes: meter.snapshot(files.length).bytes,
         rateLimitEvents, adaptive: control.summary() };
       panel.update({ phase: 'finalizing', active: 0, etaMs: null, message: 'Writing the results report…' });
+      if (savePrompts && results.images.length) {
+        results.promptRetryCheckpoint = await persistPromptRetryCheckpoint(results, DOWNLOAD_FOLDER);
+      }
       await exportJson(results, reportName);
       btn.textContent = files.length
         ? `${results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? '⚠️' : '⬇️'} ${results.queued} originals queued, ${results.failed} failed, ${results.warnings} with warnings. Numbers ${files[0].sequence}–${files[files.length - 1].sequence}; skipped ${results.skipped}.${savePrompts ? ` ${grouping.selectedGroupCount} prompt groups, ${grouping.selectedUnresolvedCount} images in 未解析, ${promptExport.saveErrors.length} TXT failures.` : ''} See download-results.json${meta.exportError ? ' (metadata export failed)' : ''}`
@@ -870,8 +1003,9 @@ async function chooseDownloadLocation() {
             </div>
             <div class="prompt-option">
               <label for="bulk-dl-retry-report">仅重试上次失败的提示词（可选）</label>
+              <button type="button" class="prompt-toggle" id="bulk-dl-retry-saved" hidden></button>
               <input type="file" id="bulk-dl-retry-report" />
-              <p class="hint">选择旧目录中的 chatgpt-images-download-results.json，或上次的 prompt-retry-results JSON。只读取报告内仍未解析的会话，把新提示词写到该目录的“未解析”文件夹；不重新下载图片。上面的目录名须与旧目录完全一致。</p>
+              <p class="hint">插件会自动保存本页最近一次未解析清单，并在这里提供一键重试；也可手动选择旧下载结果或 prompt-retry-results JSON。重试不重新下载图片。</p>
             </div>
             <div class="parallel">
               <div><label for="bulk-dl-mode">Concurrency</label><p id="bulk-dl-parallel-hint" class="hint">Auto probes capacity and backs off when congested.</p></div>
@@ -913,13 +1047,20 @@ async function chooseDownloadLocation() {
       afterInput.value = '0'; // Always explicit; never load a saved checkpoint.
       const promptsButton = root.querySelector('#bulk-dl-prompts');
       const retryInput = root.querySelector('#bulk-dl-retry-report');
-      retryInput.onchange = async () => {
-        const retryOnly = retryInput.files?.length > 0;
+      const savedRetryButton = root.querySelector('#bulk-dl-retry-saved');
+      let savedRetryReport = null, useSavedRetry = false;
+      const setRetryControls = retryOnly => {
         root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '仅重试提示词' : 'Start download';
         afterInput.disabled = retryOnly;
         promptsButton.disabled = retryOnly;
         modeInput.disabled = retryOnly;
         parallelInput.disabled = retryOnly;
+      };
+      retryInput.onchange = async () => {
+        const retryOnly = retryInput.files?.length > 0;
+        useSavedRetry = false;
+        savedRetryButton.setAttribute('aria-pressed', 'false');
+        setRetryControls(retryOnly);
         errorText.textContent = '';
         if (retryOnly) {
           try {
@@ -945,7 +1086,28 @@ async function chooseDownloadLocation() {
 
       const errorText = root.querySelector('#bulk-dl-error');
       const dialog = root.querySelector('dialog');
-      let finished = false;
+      let finished = false, startSavedWhenReady = false;
+      savedRetryButton.onclick = () => {
+        if (!savedRetryReport) return;
+        useSavedRetry = true;
+        savedRetryButton.setAttribute('aria-pressed', 'true');
+        retryInput.value = '';
+        input.value = savedRetryReport.folder;
+        setRetryControls(true);
+        errorText.textContent = '';
+        if (okBtn.disabled) startSavedWhenReady = true;
+        else okBtn.click();
+      };
+      sendToWorker({ action: 'getPromptRetryCheckpoint', page: location.href }).then(response => {
+        if (finished || response.status !== 'found' || !response.checkpoint) return;
+        try {
+          const plan = promptRetry.plan(response.checkpoint, response.checkpoint.folder, location.href);
+          savedRetryReport = response.checkpoint;
+          savedRetryButton.hidden = false;
+          savedRetryButton.textContent = `↻ 一键重试上次未解析的 ${plan.entries.length} 张图片`;
+          savedRetryButton.setAttribute('aria-pressed', 'false');
+        } catch (_) { /* Invalid or stale checkpoints remain hidden. */ }
+      }).catch(() => {});
       input.value = 'chatgpt-images';
       parallelInput.value = String(downloadQueue.DEFAULT_CONCURRENCY);
       parallelInput.disabled = true;
@@ -954,7 +1116,7 @@ async function chooseDownloadLocation() {
       okBtn.disabled = true;
       sendToWorker({ action: 'getDownloadFolder' }).then(resp => {
         if (finished) return;
-        if (!retryInput.files?.length) input.value = resp.folder || 'chatgpt-images';
+        if (!retryInput.files?.length && !useSavedRetry) input.value = resp.folder || 'chatgpt-images';
         const saved = downloadQueue.normalizeConcurrency(resp.concurrency);
         modeInput.value = saved === 'auto' ? 'auto' : 'manual';
         parallelInput.value = String(saved === 'auto' ? downloadQueue.DEFAULT_CONCURRENCY : saved);
@@ -964,9 +1126,9 @@ async function chooseDownloadLocation() {
       }).finally(() => {
         if (finished) return;
         input.disabled = false;
-        parallelInput.disabled = false;
-        modeInput.disabled = false;
+        setRetryControls(useSavedRetry || retryInput.files?.length > 0);
         okBtn.disabled = false;
+        if (startSavedWhenReady) { startSavedWhenReady = false; okBtn.click(); return; }
         input.focus();
         input.select();
       });
@@ -992,8 +1154,8 @@ async function chooseDownloadLocation() {
         errorText.textContent = '';
         try {
           const retryFile = retryInput.files?.[0];
-          let retryReport = null;
-          if (retryFile) {
+          let retryReport = useSavedRetry ? savedRetryReport : null;
+          if (!retryReport && retryFile) {
             if (retryFile.size > 32 * 1024 * 1024) throw new Error('结果报告超过 32 MB，无法安全读取。');
             try { retryReport = JSON.parse(await retryFile.text()); }
             catch (_) { throw new Error('所选文件不是有效 JSON。'); }

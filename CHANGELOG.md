@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.9.16 — 2026-09-26
+
+- Persist a minimal unresolved-prompt checkpoint per ChatGPT Images/Library route. The next settings dialog exposes a built-in one-click retry, so ordinary users do not need to locate or import a result JSON; manual import remains available as a fallback.
+- Automatically run one paced second pass for failures that can reflect temporarily incomplete conversation data (`target_not_found`, invalid JSON/response/mapping shape). Only failed prompt identities are reread; gallery discovery and original-image downloads are never repeated.
+- Future assistant/tool display envelopes with no image pointer are ignored generically. Unknown resource-bearing structures still fail explicitly to prevent prompt misassociation.
+- Checkpoints contain only file/conversation identities, sequence, local relative path and safe diagnostics. They are route-scoped, capped at ten entries and contain no conversation bodies or authentication tokens.
+- Generated group prompts and numbered retry sidecars retry up to three times when Chrome explicitly rejects the save request. Persistent failures remain explicit in the report; numbered sidecar failures also remain in the checkpoint.
+
 ## 1.9.15 — 2026-09-26
 
 - The third pass recovered 25 more prompts, bringing the on-disk total to 85. Five of the 15 remaining images were blocked by historical image pointers that do not use the modern `file_*` identity shape.

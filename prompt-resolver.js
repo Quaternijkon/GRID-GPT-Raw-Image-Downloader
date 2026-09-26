@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const RULE_VERSION = 'reference-or-text-image-rounds-v3-nonimage-attachments';
-  const ADAPTER_VERSION = 'chatgpt-mapping-v9';
+  const ADAPTER_VERSION = 'chatgpt-mapping-v10';
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const string = value => typeof value === 'string' && value.length ? value : null;
   const fail = (code, message, diagnostic) => {
@@ -35,6 +35,18 @@
     if (typeof part === 'string') return 'text';
     const type = part?.content_type;
     return typeof type === 'string' && /^[a-z0-9_:-]{1,40}$/i.test(type) ? type : 'unknown';
+  }
+
+  function containsImagePointer(value, seen = new Set(), budget = { remaining: 10000 }) {
+    if (!value || typeof value !== 'object') return false;
+    if (budget.remaining-- <= 0) return true; // Exhaustion is unknown, so fail closed.
+    if (seen.has(value)) return false;
+    seen.add(value);
+    if (value.content_type === 'image_asset_pointer') return true;
+    for (const child of Array.isArray(value) ? value : Object.values(value)) {
+      if (containsImagePointer(child, seen, budget)) return true;
+    }
+    return false;
   }
 
   function targetEvidence(mapping, targetFileId, messageId) {
@@ -111,6 +123,13 @@
     const content = message.content;
     if (role !== 'user' && nonImageContent(content)) return { kind: 'other' };
     if (!content || !['text', 'multimodal_text'].includes(content.content_type) || !Array.isArray(content.parts)) {
+      // Assistant/tool display envelopes that contain no image pointer cannot
+      // contribute user prompt text or identify an image output. Ignoring them
+      // makes the adapter tolerant of future non-image tool UI schemas while
+      // preserving fail-closed behavior for unknown resource-bearing content.
+      if (role !== 'user' && content && typeof content === 'object' && !containsImagePointer(content)) {
+        return { kind: 'other' };
+      }
       fail('unsupported_content', 'Message content does not match the supported text/multimodal adapter.', {
         role, contentType: typeof content?.content_type === 'string' ? content.content_type : 'missing',
         contentKeys: content && typeof content === 'object' && !Array.isArray(content) ? Object.keys(content).slice(0, 20) : []
@@ -123,6 +142,7 @@
       if (typeof part === 'string') texts.push(part);
       else if (part && part.content_type === 'text' && typeof part.text === 'string') texts.push(part.text);
       else if (content.content_type === 'multimodal_text' && part && part.content_type === 'image_asset_pointer') images.push(asset(part));
+      else if (role !== 'user' && !containsImagePointer(part)) continue;
       else fail('unsupported_part', 'A message contains an unsupported structured content part.');
     }
     // Separate textual parts retain their individual newlines and their ordering.

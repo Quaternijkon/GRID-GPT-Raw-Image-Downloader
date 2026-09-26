@@ -10,6 +10,37 @@ importScripts('download-queue.js');
 const sanitizeSegment = globalThis.ChatGPTOriginalImages.sanitizeSegment;
 const normalizeConcurrency = globalThis.ChatGPTDownloadQueue.normalizeConcurrency;
 
+function checkpointPage(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === 'https://chatgpt.com' && /^\/(?:images|library)(?:\/|$)/.test(url.pathname)
+      ? url.origin + url.pathname : null;
+  } catch (_) { return null; }
+}
+
+const checkpointStorageKey = checkpoint => `${checkpointPage(checkpoint.page)}\n${checkpoint.folder}`;
+
+function validPromptRetryCheckpoint(value) {
+  if (!value || value.schemaVersion !== 1 || value.kind !== 'prompt-retry-results' ||
+      !checkpointPage(value.page) || typeof value.folder !== 'string' ||
+      sanitizeSegment(value.folder, 'chatgpt-images') !== value.folder ||
+      !Array.isArray(value.images) || value.images.length > 5000) return false;
+  const sequences = new Set(), fileIds = new Set();
+  return value.images.every(item => {
+    const prefix = `${value.folder}/未解析/${String(item?.sequence).padStart(6, '0')}-`;
+    const leaf = typeof item?.imageRelativePath === 'string' ? item.imageRelativePath.slice(prefix.length) : '';
+    const valid = Number.isSafeInteger(item?.sequence) && item.sequence >= 1 && item.sequence <= 999999 &&
+      !sequences.has(item.sequence) && /^file[_-][A-Za-z0-9_-]{8,100}$/.test(item.fileId) &&
+      !fileIds.has(item.fileId) && /^[a-f0-9]{8}-[a-f0-9-]{20,60}$/i.test(item.conversationId) &&
+      typeof item.imageRelativePath === 'string' && item.imageRelativePath.startsWith(prefix) &&
+      leaf && !/[\\/]/.test(leaf) &&
+      /\.(?:png|jpe?g|webp|gif|avif|bmp)$/i.test(item.imageRelativePath) &&
+      item.promptStatus === 'unresolved' && typeof item.promptError?.code === 'string';
+    if (valid) { sequences.add(item.sequence); fileIds.add(item.fileId); }
+    return valid;
+  });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg !== 'object' || !sender.url?.startsWith('https://chatgpt.com/')) {
     sendResponse({ ok: false, error: 'Invalid extension request' });
@@ -53,7 +84,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const fail = message => {
           // Only repeat an explicitly rejected filename. Never retry an accepted
           // download or an uncertain timeout, which could create duplicate files.
-          if (!prompt && !filenameFallback && /invalid filename|filename.*invalid|文件名.*无效/i.test(message)) {
+          if (!prompt && !retryPrompt && !filenameFallback && /invalid filename|filename.*invalid|文件名.*无效/i.test(message)) {
             attemptDownload(fallbackName, true);
           } else sendResponse({ ok: false, error: message });
         };
@@ -76,6 +107,62 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.downloads.showDefaultFolder();
       sendResponse({ status: 'shown' });
       return false;
+    }
+
+    if (msg.action === 'getPromptRetryCheckpoint') {
+      const page = checkpointPage(msg.page);
+      if (!page) { sendResponse({ status: 'invalid', checkpoint: null }); return false; }
+      chrome.storage.local.get(['promptRetryCheckpoints'], res => {
+        const error = chrome.runtime.lastError;
+        const checkpoint = Object.values(res?.promptRetryCheckpoints || {})
+          .filter(item => validPromptRetryCheckpoint(item) && checkpointPage(item.page) === page)
+          .sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')))[0];
+        sendResponse(error ? { status: 'error', error: error.message } :
+          { status: checkpoint && validPromptRetryCheckpoint(checkpoint) ? 'found' : 'missing',
+            checkpoint: checkpoint && validPromptRetryCheckpoint(checkpoint) ? checkpoint : null });
+      });
+      return true;
+    }
+
+    if (msg.action === 'savePromptRetryCheckpoint') {
+      const checkpoint = msg.checkpoint;
+      const processedFileIds = Array.isArray(msg.processedFileIds) ? msg.processedFileIds : [];
+      if (!validPromptRetryCheckpoint(checkpoint) || processedFileIds.length > 5000 ||
+          processedFileIds.some(id => typeof id !== 'string' || !/^file[_-][A-Za-z0-9_-]{8,100}$/.test(id)) ||
+          new Set(processedFileIds).size !== processedFileIds.length ||
+          JSON.stringify(checkpoint).length > 2 * 1024 * 1024) {
+        sendResponse({ status: 'invalid', error: 'Invalid prompt retry checkpoint' });
+        return false;
+      }
+      const storageKey = checkpointStorageKey(checkpoint);
+      chrome.storage.local.get(['promptRetryCheckpoints'], res => {
+        const readError = chrome.runtime.lastError;
+        if (readError) { sendResponse({ status: 'error', error: readError.message }); return; }
+        const checkpoints = res?.promptRetryCheckpoints && typeof res.promptRetryCheckpoints === 'object'
+          ? { ...res.promptRetryCheckpoints } : {};
+        const previous = checkpoints[storageKey];
+        const processed = new Set(processedFileIds);
+        const incomingSequences = new Set(checkpoint.images.map(item => item.sequence));
+        const retained = previous && validPromptRetryCheckpoint(previous) && previous.folder === checkpoint.folder
+          ? previous.images.filter(item => !processed.has(item.fileId) && !incomingSequences.has(item.sequence)) : [];
+        const combinedById = new Map(retained.map(item => [item.fileId, item]));
+        for (const item of checkpoint.images) combinedById.set(item.fileId, item);
+        const combined = { ...checkpoint, images: [...combinedById.values()].sort((a, b) => a.sequence - b.sequence) };
+        if (!validPromptRetryCheckpoint(combined)) {
+          sendResponse({ status: 'invalid', error: 'Merged prompt retry checkpoint is invalid' });
+          return;
+        }
+        if (combined.images.length) checkpoints[storageKey] = combined;
+        else delete checkpoints[storageKey];
+        const ordered = Object.entries(checkpoints).sort((a, b) =>
+          String(b[1]?.createdAt || '').localeCompare(String(a[1]?.createdAt || ''))).slice(0, 10);
+        chrome.storage.local.set({ promptRetryCheckpoints: Object.fromEntries(ordered) }, () => {
+          const error = chrome.runtime.lastError;
+          sendResponse(error ? { status: 'error', error: error.message } :
+            { status: 'saved', count: combined.images.length });
+        });
+      });
+      return true;
     }
 
     if (msg.action === 'getDownloadFolder') {

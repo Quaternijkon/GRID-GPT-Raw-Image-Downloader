@@ -23,7 +23,7 @@ function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
       }
     } }
   };
-  const context = vm.createContext({ chrome, console });
+  const context = vm.createContext({ chrome, console, URL });
   context.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), context);
   return message => new Promise(resolve => listener(message, { url: 'https://chatgpt.com/images' }, resolve));
@@ -97,6 +97,25 @@ test('Auto preference is persisted without coercing it into a manual limit', asy
   const saved = await send({ action: 'setDownloadFolder', folder: 'images', concurrency: 'auto' });
   assert.equal(saved.concurrency, 'auto');
   assert.equal((await send({ action: 'getDownloadFolder' })).concurrency, 'auto');
+});
+
+test('prompt retry checkpoints are validated, scoped by page and replaceable', async () => {
+  const send = worker();
+  const checkpoint = { schemaVersion: 1, kind: 'prompt-retry-results', extensionVersion: '1.9.16',
+    createdAt: '2026-09-26T00:00:00Z', page: 'https://chatgpt.com/images/', scope: 'generated-images',
+    folder: 'images', images: [{ sequence: 68, fileId: 'file_000000003f9071fdaeb1333ac2b5a412',
+      conversationId: '6a0ec392-502c-8332-8013-ca4f1df10cb5',
+      imageRelativePath: 'images/未解析/000068-example.png', promptStatus: 'unresolved',
+      promptError: { code: 'target_not_found', message: 'Missing' } }] };
+  assert.equal((await send({ action: 'savePromptRetryCheckpoint', checkpoint })).count, 1);
+  assert.equal((await send({ action: 'getPromptRetryCheckpoint', page: checkpoint.page })).checkpoint.images.length, 1);
+  assert.equal((await send({ action: 'getPromptRetryCheckpoint', page: 'https://chatgpt.com/library/' })).checkpoint, null);
+  assert.equal((await send({ action: 'savePromptRetryCheckpoint', checkpoint: {
+    ...checkpoint, images: [{ ...checkpoint.images[0], imageRelativePath: 'images/../escape.png' }]
+  } })).status, 'invalid');
+  assert.equal((await send({ action: 'savePromptRetryCheckpoint', checkpoint: { ...checkpoint, images: [] },
+    processedFileIds: [checkpoint.images[0].fileId] })).count, 0);
+  assert.equal((await send({ action: 'getPromptRetryCheckpoint', page: checkpoint.page })).checkpoint, null);
 });
 
 // Prompt export regression definitions only; not executed during implementation.

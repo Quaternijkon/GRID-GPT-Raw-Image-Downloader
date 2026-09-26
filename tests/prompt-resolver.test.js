@@ -200,6 +200,20 @@ test('unknown or resource-bearing non-image schemas fail closed', () => {
   assert.equal(resolve(conversation(user, output('a', 'u', 'file_a')), 'file_a')[0].error.code, 'unsupported_content');
 });
 
+test('future non-image assistant and tool display envelopes are ignored', () => {
+  for (const role of ['assistant', 'tool']) {
+    const other = node('other', 'u', role, []);
+    other.message.content = { content_type: 'future_display_envelope', payload: { arbitrary: ['safe', 1] } };
+    const result = resolve(conversation(base(), other, output('a', 'other', 'file_a')), 'file_a')[0];
+    assert.equal(result.status, 'resolved');
+    assert.equal(result.cumulativePrompt, 'P');
+  }
+  const resource = node('resource', 'u', 'tool', []);
+  resource.message.content = { content_type: 'future_display_envelope', payload: image('file_hidden') };
+  assert.equal(resolve(conversation(base(), resource, output('a', 'resource', 'file_a')), 'file_a')[0].error.code,
+    'unsupported_content');
+});
+
 test('an output without base cannot acquire a valid base from a subsequent edit', () => {
   const c = conversation(node('u', null, 'user', [image('file_ref')]), output('a', 'u', 'file_a'),
     node('edit', 'a', 'user', ['E']), output('b', 'edit', 'file_b'));
