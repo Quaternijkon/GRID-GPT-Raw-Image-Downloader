@@ -10,7 +10,7 @@
     const result = {};
     for (const key of ['mappingNodes', 'exactPointerParts', 'exactPointerInOutputRole',
       'attachmentCount', 'imageParts', 'branchNodes', 'userTextMessages',
-      'referenceInputs', 'outputMessages']) {
+      'referenceInputs', 'outputMessages', 'candidateCount', 'resolvedCandidates', 'distinctPromptCount']) {
       if (Number.isSafeInteger(value[key]) && value[key] >= 0) result[key] = value[key];
     }
     if (typeof value.galleryMessagePresent === 'boolean') result.galleryMessagePresent = value.galleryMessagePresent;
@@ -18,7 +18,7 @@
     if (['text', 'image', 'application', 'audio', 'video', 'unknown'].includes(value.attachmentMimeClass)) {
       result.attachmentMimeClass = value.attachmentMimeClass;
     }
-    for (const key of ['attachmentKeys', 'partTypes', 'contentKeys']) {
+    for (const key of ['attachmentKeys', 'partTypes', 'contentKeys', 'candidateErrorCodes']) {
       if (Array.isArray(value[key])) result[key] = value[key]
         .filter(item => typeof item === 'string' && /^[a-z0-9_:-]{1,40}$/i.test(item)).slice(0, 20);
     }

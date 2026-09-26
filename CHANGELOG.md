@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.13 — 2026-09-26
+
+- Used the first live prompt-only retry diagnostics to classify `tether_browsing_display` and `system_error` tool content as non-prompt events with exact schema checks.
+- Replays every exact duplicate output candidate independently. A duplicate resource is accepted only when every verified ancestry produces the same cumulative prompt; differing or partially unsupported ancestries remain explicitly ambiguous.
+- The diagnostic run read exactly 43 failed conversations with 43 requests, no HTTP 429 and no original-image downloads. Its retry report is the input for the next remaining-failures-only pass.
+
 ## 1.9.12 — 2026-09-26
 
 - Removed the native file input's JSON MIME filter after macOS displayed valid result files but disabled the Open action. Imported content still passes the extension's strict schema, route, folder and per-image identity validation before any authenticated request.

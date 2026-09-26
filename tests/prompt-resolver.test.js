@@ -76,7 +76,10 @@ test('broken and cyclic parent chains are rejected', () => {
 
 test('duplicate resource outputs require disambiguation and message IDs are crosschecked', () => {
   const c = conversation(base(), output('a', 'u', 'file_a'), output('b', 'u', 'file_a'));
-  assert.equal(resolve(c, 'file_a')[0].error.code, 'ambiguous_target');
+  const duplicate = resolve(c, 'file_a')[0];
+  assert.equal(duplicate.status, 'resolved');
+  assert.equal(duplicate.identityWarning, 'duplicate_output_same_prompt');
+  assert.equal(duplicate.duplicateOutputCount, 2);
   assert.equal(resolver.resolveConversation(c, [{ fileId: 'file_a', messageId: 'b' }])[0].outputMessageId, 'b');
   const single = conversation(base(), output('a', 'u', 'file_a'));
   assert.equal(resolver.resolveConversation(single, [{ fileId: 'file_a', messageId: 'u' }])[0].status, 'resolved');
@@ -86,8 +89,17 @@ test('duplicate resource outputs require disambiguation and message IDs are cros
   assert.equal(stale.galleryMessageId, 'absent');
   const sibling = conversation(base(), output('a', 'u', 'file_a'), output('b', 'u', 'file_b'));
   assert.equal(resolver.resolveConversation(sibling, [{ fileId: 'file_a', messageId: 'b' }])[0].error.code, 'message_identity_conflict');
-  assert.equal(resolver.resolveConversation(c, [{ fileId: 'file_a', messageId: 'absent' }])[0].error.code, 'ambiguous_target');
+  assert.equal(resolver.resolveConversation(c, [{ fileId: 'file_a', messageId: 'absent' }])[0].status, 'resolved');
   assert.equal(resolver.resolveConversation(single, [{ fileId: 'file_a', assetPointer: 'sediment://file_b' }])[0].error.code, 'target_identity_conflict');
+});
+
+test('duplicate outputs remain ambiguous when their prompt ancestry differs', () => {
+  const c = conversation(base(), output('a', 'u', 'file_a'),
+    node('edit', 'a', 'user', ['E']), output('b', 'edit', 'file_a'));
+  const result = resolve(c, 'file_a')[0];
+  assert.equal(result.error.code, 'ambiguous_target');
+  assert.deepEqual(result.error.diagnostic, { candidateCount: 2, resolvedCandidates: 2,
+    distinctPromptCount: 2, candidateErrorCodes: [] });
 });
 
 test('prose URLs, placeholders, tool requests and error responses are not output', () => {
@@ -145,6 +157,8 @@ test('explicit non-image assistant/tool schemas do not finish a waiting round', 
     { content_type: 'reasoning_recap', content: 'hidden recap' },
     { content_type: 'code', language: 'python', text: 'hidden code', response_format_name: null },
     { content_type: 'execution_output', text: 'hidden execution' }
+    ,{ content_type: 'system_error', name: 'tool_error', text: 'hidden error' }
+    ,{ content_type: 'tether_browsing_display', result: 'hidden result', summary: 'hidden summary', assets: [], tether_id: 't' }
   ];
   for (const role of ['assistant', 'tool']) for (const content of contents) {
     const other = node('other', 'u', role, []);

@@ -148,6 +148,7 @@ function promptSource(record) {
     referenceImages: record.referenceImages, nonImageAttachmentCount: record.nonImageAttachmentCount,
     sourceMessageIds: record.sourceMessageIds,
     outputMessageId: record.outputMessageId, outputAssetId: record.outputAssetId,
+    duplicateOutputCount: record.duplicateOutputCount,
     identityWarning: record.identityWarning, galleryMessageId: record.galleryMessageId,
     branchPath: record.branchPath, ruleVersion: record.ruleVersion, adapterVersion: record.adapterVersion };
 }

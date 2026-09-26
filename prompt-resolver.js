@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const RULE_VERSION = 'reference-or-text-image-rounds-v3-nonimage-attachments';
-  const ADAPTER_VERSION = 'chatgpt-mapping-v6';
+  const ADAPTER_VERSION = 'chatgpt-mapping-v7';
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const string = value => typeof value === 'string' && value.length ? value : null;
   const fail = (code, message, diagnostic) => {
@@ -66,6 +66,16 @@
     }
     if (content.content_type === 'execution_output') {
       return keysOnly(content, ['content_type', 'text']) && typeof content.text === 'string';
+    }
+    if (content.content_type === 'system_error') {
+      return keysOnly(content, ['content_type', 'name', 'text']) &&
+        (content.name == null || typeof content.name === 'string') && typeof content.text === 'string';
+    }
+    if (content.content_type === 'tether_browsing_display') {
+      return keysOnly(content, ['content_type', 'result', 'summary', 'assets', 'tether_id']) &&
+        (content.result == null || typeof content.result === 'string') &&
+        (content.summary == null || typeof content.summary === 'string') &&
+        (content.tether_id == null || typeof content.tether_id === 'string') && Array.isArray(content.assets);
     }
     if (content.content_type === 'thoughts') {
       return keysOnly(content, ['content_type', 'thoughts', 'source_analysis_msg_id']) &&
@@ -166,6 +176,95 @@
     return path.reverse();
   }
 
+  function snapshot(mapping, target, messageId) {
+    const path = ancestry(mapping, target.nodeId);
+    const snapshot = {};
+    // Library message IDs may identify an input ancestor rather than output.
+    // Treat only absent hints as stale; present unrelated nodes still conflict.
+    if (messageId && !path.some(id => mapping[id].message && mapping[id].message.id === messageId)) {
+      if (Object.values(mapping).some(node => node?.message?.id === messageId)) {
+        fail('message_identity_conflict', 'The supplied message ID is outside the target output ancestry.');
+      }
+      snapshot.identityWarning = 'gallery_message_missing';
+      snapshot.galleryMessageId = messageId;
+    }
+    // A confirmed new input image resets the task and makes older unsupported
+    // content irrelevant, while topology remains fully checked by ancestry().
+    let taskStart = 0;
+    for (let index = path.length - 1; index >= 0; index--) {
+      try {
+        if (event(mapping[path[index]]).kind === 'image') { taskStart = index; break; }
+      } catch (_) { /* Replay still rejects unsupported content after reset. */ }
+    }
+    let state = 'NO_TASK';
+    let base = null;
+    let root = null;
+    let taskKind = null;
+    let hasOutput = false;
+    let references = [];
+    let edits = [];
+    let sources = [];
+    let nonImageAttachmentCount = 0;
+    let userTextMessages = 0, referenceInputs = 0, outputMessages = 0;
+    for (const id of path.slice(taskStart)) {
+      const current = event(mapping[id]);
+      if (current.kind === 'image') {
+        referenceInputs++;
+        root = current.id;
+        taskKind = 'reference-image';
+        hasOutput = false;
+        references = current.images;
+        nonImageAttachmentCount = current.nonImageAttachments.length;
+        base = current.text.trim() ? current.text : null;
+        edits = [];
+        sources = [current.id];
+        state = base === null ? 'WAIT_BASE_TEXT' : 'WAIT_OUTPUT';
+      } else if (current.kind === 'text' && current.text.trim()) {
+        userTextMessages++;
+        if (state === 'NO_TASK' || (taskKind === 'text-only' && state === 'WAIT_OUTPUT' && !hasOutput)) {
+          root = current.id;
+          taskKind = 'text-only';
+          base = current.text;
+          references = [];
+          nonImageAttachmentCount = current.nonImageAttachments.length;
+          edits = [];
+          sources = [current.id];
+          state = 'WAIT_OUTPUT';
+        } else if (state === 'WAIT_BASE_TEXT') {
+          base = current.text;
+          nonImageAttachmentCount += current.nonImageAttachments.length;
+          sources.push(current.id);
+          state = 'WAIT_OUTPUT';
+        } else if (state === 'OUTPUT_READY') {
+          edits.push({ messageId: current.id, text: current.text });
+          nonImageAttachmentCount += current.nonImageAttachments.length;
+          sources.push(current.id);
+          state = 'WAIT_OUTPUT';
+        }
+      } else if (current.kind === 'output') {
+        outputMessages++;
+        if (id === target.nodeId) {
+          if (!root) fail('no_reference_task', 'No supported user image request exists on the target branch.', {
+            mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
+            userTextMessages, referenceInputs, outputMessages
+          });
+          if (base === null) fail('missing_base', 'The image task has no initial user text.', {
+            mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
+            userTextMessages, referenceInputs, outputMessages
+          });
+          return { ...snapshot, status: 'resolved', basePrompt: base,
+            cumulativePrompt: normalize([base, ...edits.map(edit => edit.text)].join('\n\n')).trim(),
+            taskKind, taskRootMessageId: root, referenceImages: references.map(image => ({ ...image })),
+            nonImageAttachmentCount, editSteps: edits.map(edit => ({ ...edit })),
+            sourceMessageIds: [...sources], outputMessageId: current.id,
+            outputAssetId: target.assetPointer, branchPath: [...path] };
+        }
+        if (root) { hasOutput = true; state = 'OUTPUT_READY'; }
+      }
+    }
+    fail('target_replay_failed', 'Target output was not reached on its verified ancestry.');
+  }
+
   function resolveConversation(conversation, entries) {
     const mapping = conversation && conversation.mapping;
     const validMapping = mapping && typeof mapping === 'object' && !Array.isArray(mapping);
@@ -223,97 +322,23 @@
           const direct = candidates.filter(output => output.messageId === messageId);
           if (direct.length) matches = direct;
         }
-        if (matches.length !== 1) fail('ambiguous_target', 'The image resource matches multiple outputs.');
-        const target = matches[0];
-        const path = ancestry(mapping, target.nodeId);
-        // Library message IDs may identify an input ancestor rather than output.
-        // A sampled gallery ID was absent from the entire regular mapping even
-        // though its exact file pointer had one actual output with complete ancestry.
-        // Treat only absent hints as stale; present unrelated nodes still conflict.
-        if (messageId && !path.some(id => mapping[id].message && mapping[id].message.id === messageId)) {
-          if (Object.values(mapping).some(node => node?.message?.id === messageId)) {
-            fail('message_identity_conflict', 'The supplied message ID is outside the target output ancestry.');
-          }
-          result.identityWarning = 'gallery_message_missing';
-          result.galleryMessageId = messageId;
-        }
-        // The complete topology above must be sound, but a confirmed new input
-        // image resets the task and makes older content irrelevant to its text.
-        let taskStart = 0;
-        for (let index = path.length - 1; index >= 0; index--) {
-          try {
-            if (event(mapping[path[index]]).kind === 'image') { taskStart = index; break; }
-          } catch (_) { /* Replay still rejects unsupported content after reset. */ }
-        }
-        let state = 'NO_TASK';
-        let base = null;
-        let root = null;
-        let taskKind = null;
-        let hasOutput = false;
-        let references = [];
-        let edits = [];
-        let sources = [];
-        let nonImageAttachmentCount = 0;
-        let userTextMessages = 0, referenceInputs = 0, outputMessages = 0;
-        for (const id of path.slice(taskStart)) {
-          const current = event(mapping[id]);
-          if (current.kind === 'image') {
-            referenceInputs++;
-            root = current.id;
-            taskKind = 'reference-image';
-            hasOutput = false;
-            references = current.images;
-            nonImageAttachmentCount = current.nonImageAttachments.length;
-            base = current.text.trim() ? current.text : null;
-            edits = [];
-            sources = [current.id];
-            state = base === null ? 'WAIT_BASE_TEXT' : 'WAIT_OUTPUT';
-          } else if (current.kind === 'text' && current.text.trim()) {
-            userTextMessages++;
-            if (state === 'NO_TASK' || (taskKind === 'text-only' && state === 'WAIT_OUTPUT' && !hasOutput)) {
-              // Before the first actual output, the latest pure user text is
-              // the text-only image request. No unrelated earlier chat text
-              // or model prose is added to the prompt snapshot.
-              root = current.id;
-              taskKind = 'text-only';
-              base = current.text;
-              references = [];
-              nonImageAttachmentCount = current.nonImageAttachments.length;
-              edits = [];
-              sources = [current.id];
-              state = 'WAIT_OUTPUT';
-            } else if (state === 'WAIT_BASE_TEXT') {
-              base = current.text;
-              nonImageAttachmentCount += current.nonImageAttachments.length;
-              sources.push(current.id);
-              state = 'WAIT_OUTPUT';
-            } else if (state === 'OUTPUT_READY') {
-              edits.push({ messageId: current.id, text: current.text });
-              nonImageAttachmentCount += current.nonImageAttachments.length;
-              sources.push(current.id);
-              state = 'WAIT_OUTPUT';
-            }
-            // WAIT_OUTPUT pure text is discarded immediately and never retained.
-          } else if (current.kind === 'output') {
-            outputMessages++;
-            if (id === target.nodeId) {
-              if (!root) fail('no_reference_task', 'No supported user image request exists on the target branch.', {
-                mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
-                userTextMessages, referenceInputs, outputMessages
-              });
-              if (base === null) fail('missing_base', 'The image task has no initial user text.', {
-                mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
-                userTextMessages, referenceInputs, outputMessages
-              });
-              Object.assign(result, { status: 'resolved', basePrompt: base,
-                cumulativePrompt: normalize([base, ...edits.map(edit => edit.text)].join('\n\n')).trim(),
-                taskKind, taskRootMessageId: root, referenceImages: references.map(image => ({ ...image })),
-                nonImageAttachmentCount,
-                editSteps: edits.map(edit => ({ ...edit })), sourceMessageIds: [...sources],
-                outputMessageId: current.id, outputAssetId: target.assetPointer, branchPath: [...path] });
-            }
-            if (root) { hasOutput = true; state = 'OUTPUT_READY'; }
-          }
+        if (matches.length === 1) Object.assign(result, snapshot(mapping, matches[0], messageId));
+        else {
+          const attempts = matches.map(target => {
+            try { return { target, value: snapshot(mapping, target, messageId) }; }
+            catch (error) { return { target, error }; }
+          });
+          const resolved = attempts.filter(attempt => attempt.value);
+          const prompts = new Set(resolved.map(attempt => attempt.value.cumulativePrompt));
+          if (resolved.length === attempts.length && prompts.size === 1) {
+            Object.assign(result, resolved[0].value, { identityWarning: 'duplicate_output_same_prompt',
+              duplicateOutputCount: matches.length });
+          } else fail('ambiguous_target', 'The image resource matches outputs with non-equivalent prompt ancestry.', {
+            candidateCount: attempts.length, resolvedCandidates: resolved.length,
+            distinctPromptCount: prompts.size,
+            candidateErrorCodes: [...new Set(attempts.filter(attempt => attempt.error)
+              .map(attempt => attempt.error.code || 'invalid_conversation'))]
+          });
         }
       } catch (error) {
         result.error = { code: error.code || 'invalid_conversation', message: error.message || 'Unsupported conversation data.',
