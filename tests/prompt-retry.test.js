@@ -11,6 +11,7 @@ const report = () => ({ schemaVersion: 4, extensionVersion: '1.9.10',
       conversationId: 'untrusted', status: 'queued', groupName: '未解析', promptStatus: 'unresolved',
       promptError: { code: 'target_not_found', message: 'Absent' },
       promptSource: { conversationId: '6a0ec392-502c-8332-8013-ca4f1df10cb5' },
+      downloadId: 68,
       name: '000068-example.png', relativePath: 'chatgpt-images-1.9.10/未解析/000068-example.png' },
     { sequence: 69, fileId: 'file_000000003f9071fdaeb1333ac2b5a413',
       status: 'queued', promptStatus: 'resolved' }
@@ -48,9 +49,11 @@ test('a later retry reads only remaining failures from the last retry report', (
     images: [
       { sequence: failed.sequence, fileId: failed.fileId,
         conversationId: failed.promptSource.conversationId,
+        sourceDownloadId: failed.downloadId,
         imageRelativePath: failed.relativePath, promptStatus: 'unresolved', promptError: failed.promptError },
       { sequence: 69, fileId: 'file_000000003f9071fdaeb1333ac2b5a413',
         conversationId: failed.promptSource.conversationId,
+        sourceDownloadId: 69,
         imageRelativePath: 'chatgpt-images-1.9.10/未解析/000069-done.png',
         promptStatus: 'resolved', saveStatus: 'queued' }
     ] };

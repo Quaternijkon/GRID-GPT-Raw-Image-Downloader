@@ -26,6 +26,7 @@ const promptConversations = globalThis.ChatGPTPromptConversations;
 const promptRetry = globalThis.ChatGPTPromptRetry;
 let selectedSavePrompts = false;
 let selectedRetryPlan = null;
+let selectedImageRetryPlan = null;
 const downloadProgress = globalThis.ChatGPTDownloadProgress;
 let selectedConcurrency = downloadQueue.DEFAULT_MODE;
 let floatingProgress = null;
@@ -99,9 +100,9 @@ function scrollImageView() {
     position: positions.map(p => p.el.scrollTop).join(',') };
 }
 
-function sendToWorker(message) {
+function sendToWorker(message, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Extension worker timed out; reload the extension and refresh this page.')), 60000);
+    const timer = setTimeout(() => reject(new Error('Extension worker timed out; reload the extension and refresh this page.')), timeoutMs);
     try {
       if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) throw new Error('Extension worker unavailable');
       chrome.runtime.sendMessage(message, response => {
@@ -118,12 +119,14 @@ function sendToWorker(message) {
   });
 }
 
-async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, unresolved, kind, conflictAction, retrySequence } = {}) {
+async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, groupName, unresolved, kind, conflictAction, retrySequence, replaceDownloadId, workerTimeoutMs } = {}) {
   const response = await sendToWorker({ action: 'downloadFile', url, name, folder, fallbackName,
     ...(groupNumber !== undefined ? { groupNumber } : {}),
+    ...(groupName !== undefined ? { groupName } : {}),
     ...(unresolved === true ? { unresolved: true } : {}),
     ...(retrySequence !== undefined ? { retrySequence } : {}),
-    ...(kind ? { kind } : {}), ...(conflictAction ? { conflictAction } : {}) });
+    ...(replaceDownloadId !== undefined ? { replaceDownloadId } : {}),
+    ...(kind ? { kind } : {}), ...(conflictAction ? { conflictAction } : {}) }, workerTimeoutMs || 60000);
   if (!response.ok) throw new Error('Download worker rejected the request');
   if (!Number.isInteger(response.downloadId) || response.downloadId < 0) throw new Error('Missing or invalid download ID');
   onAccepted?.(response);
@@ -232,6 +235,8 @@ function promptRetryCheckpoint(results, folder) {
         `${folder}/未解析/${item.name || item.originalName || ''}`;
       if (!conversationId || !item.fileId || !Number.isSafeInteger(item.sequence)) return null;
       return { sequence: item.sequence, fileId: item.fileId, conversationId, imageRelativePath,
+        ...(Number.isInteger(item.sourceDownloadId ?? item.downloadId)
+          ? { sourceDownloadId: item.sourceDownloadId ?? item.downloadId } : {}),
         promptStatus: 'unresolved', promptError: item.promptError ||
           { code: 'prompt_save_failed', message: item.saveError || 'Prompt file was not saved' },
         ...(item.saveStatus === 'failed' ? { saveStatus: 'failed', saveError: item.saveError } : {}) };
@@ -252,6 +257,177 @@ async function persistPromptRetryCheckpoint(results, folder) {
   } catch (error) {
     return { saved: false, count: 0, error: error.message };
   }
+}
+
+function imageRetryCheckpoint(results, folder) {
+  const images = (results.images || []).filter(item => item.status === 'failed').map(item => ({
+    sequence: item.sequence, fileId: item.fileId,
+    originalName: item.originalName || item.name,
+    groupName: results.savePrompts ? item.groupName || '未解析' : null,
+    promptStatus: results.savePrompts ? item.promptStatus || 'unresolved' : 'resolved',
+    ...(item.promptError ? { promptError: item.promptError } : {}),
+    ...(item.promptSource?.conversationId ? { conversationId: item.promptSource.conversationId } : {})
+  })).filter(item => item.originalName);
+  return { schemaVersion: 1, kind: 'image-retry-checkpoint', extensionVersion,
+    createdAt: new Date().toISOString(), page: results.page, scope: results.scope,
+    folder, savePrompts: results.savePrompts === true, images };
+}
+
+async function persistImageRetryCheckpoint(results, folder) {
+  try {
+    const checkpoint = imageRetryCheckpoint(results, folder);
+    const processedFileIds = (results.images || []).map(item => item.fileId).filter(Boolean);
+    const response = await sendToWorker({ action: 'saveImageRetryCheckpoint', checkpoint, processedFileIds });
+    return { saved: response.status === 'saved', count: response.count ?? checkpoint.images.length };
+  } catch (error) {
+    return { saved: false, count: 0, error: error.message };
+  }
+}
+
+function planImageRetry(checkpoint, page) {
+  if (!checkpoint || checkpoint.kind !== 'image-retry-checkpoint' || checkpoint.schemaVersion !== 1 ||
+      !Array.isArray(checkpoint.images) || !checkpoint.images.length) throw new Error('没有可重试的原图失败项。');
+  const expected = new URL(checkpoint.page), current = new URL(page);
+  if (expected.origin !== current.origin || expected.pathname !== current.pathname || expected.origin !== 'https://chatgpt.com') {
+    throw new Error('原图重试检查点与当前页面不匹配。');
+  }
+  return { ...checkpoint, entries: checkpoint.images.map(item => ({ ...item,
+    imageName: item.originalName,
+    ...(/^\d+$/.test(item.groupName || '') ? { groupNumber: Number(item.groupName) } : {}),
+    candidates: [] })) };
+}
+
+function planImageRetryFromReport(report, folder, page) {
+  if (!report || report.schemaVersion !== 4 || !Array.isArray(report.images)) return null;
+  const failed = report.images.filter(item => item?.status === 'failed');
+  if (!failed.length) return null;
+  const previous = new URL(report.page), current = new URL(page);
+  if (previous.origin !== 'https://chatgpt.com' || previous.origin !== current.origin ||
+      previous.pathname !== current.pathname || typeof folder !== 'string' || !folder) {
+    throw new Error('原图失败报告与当前页面或下载目录不匹配。');
+  }
+  const seen = new Set();
+  const entries = failed.map(item => {
+    const groupName = report.savePrompts ? item.groupName || '未解析' : null;
+    const legacyGroup = typeof groupName === 'string' && /^\d+$/.test(groupName)
+      ? Number(groupName) : undefined;
+    if (!Number.isSafeInteger(item.sequence) || !/^file[_-][A-Za-z0-9_-]{8,100}$/.test(item.fileId) ||
+        seen.has(item.fileId) || typeof (item.originalName || item.name) !== 'string' ||
+        (groupName !== null && groupName !== '未解析' && legacyGroup === undefined &&
+          !/^p-[0-9a-f]{32}-[0-9a-f]+$/.test(groupName))) {
+      throw new Error('原图失败报告包含无效或冲突的图片身份。');
+    }
+    seen.add(item.fileId);
+    return { sequence: item.sequence, fileId: item.fileId,
+      originalName: item.originalName || item.name, imageName: item.originalName || item.name,
+      groupName, ...(legacyGroup !== undefined ? { groupNumber: legacyGroup } : {}),
+      promptStatus: report.savePrompts ? item.promptStatus || 'unresolved' : 'resolved',
+      promptError: item.promptError, conversationId: item.promptSource?.conversationId, candidates: [] };
+  });
+  return { schemaVersion: 1, kind: 'image-retry-checkpoint', extensionVersion: report.extensionVersion,
+    createdAt: report.createdAt, page: report.page, scope: report.scope, folder,
+    savePrompts: report.savePrompts === true, entries, images: entries };
+}
+
+async function resolveOriginalForRecovery(client, entry, checkActive, onWait = () => {}) {
+  let recoveryRounds = 0, totalAttempts = 0;
+  const retrievalErrors = [];
+  for (;;) {
+    checkActive();
+    try {
+      const asset = await client.resolve({ fileId: entry.fileId, name: entry.imageName, candidates: [] });
+      totalAttempts += asset.retrievalAttempts || 1;
+      retrievalErrors.push(...(asset.retrievalErrors || []));
+      return { ...asset, retrievalAttempts: totalAttempts, retrievalErrors, recoveryRounds };
+    } catch (error) {
+      totalAttempts += error?.retrievalAttempts || 1;
+      retrievalErrors.push(...(error?.details || []));
+      if (error?.retryable !== true || recoveryRounds >= 12) {
+        error.retrievalAttempts = totalAttempts;
+        error.details = retrievalErrors;
+        error.recoveryRounds = recoveryRounds;
+        throw error;
+      }
+      recoveryRounds++;
+      const delayMs = Math.max(error.retryAfterMs || 0,
+        Math.min(60000, 10000 * 2 ** Math.min(3, recoveryRounds - 1)));
+      onWait({ recoveryRounds, delayMs });
+      const deadline = Date.now() + delayMs;
+      while (Date.now() < deadline) {
+        checkActive();
+        await new Promise(resolve => setTimeout(resolve, Math.min(1000, deadline - Date.now())));
+      }
+    }
+  }
+}
+
+async function retryFailedImages(plan, { folder, ensureSameView, panel, status }) {
+  const client = originalImages.createClient();
+  const results = { schemaVersion: 1, kind: 'image-retry-results', extensionVersion,
+    createdAt: new Date().toISOString(), page: plan.page, scope: plan.scope, folder,
+    savePrompts: plan.savePrompts === true, selectedImages: plan.entries.length,
+    queued: 0, failed: 0, imageDownloadsRequested: plan.entries.length, images: [] };
+  status(`仅重试上次失败的 ${plan.entries.length} 张原图…`, 'images');
+  panel.update({ stage: 'images', total: plan.entries.length, completed: 0, active: 1,
+    queued: 0, failed: 0, retrying: 0, etaMs: null });
+  for (let index = 0; index < plan.entries.length; index++) {
+    ensureSameView();
+    const entry = plan.entries[index];
+    const record = { sequence: entry.sequence, fileId: entry.fileId,
+      originalName: entry.originalName, groupName: entry.groupName,
+      promptStatus: entry.promptStatus, promptError: entry.promptError,
+      ...(entry.conversationId ? { promptSource: { conversationId: entry.conversationId } } : {}),
+      status: 'failed', warnings: [] };
+    try {
+      const asset = await resolveOriginalForRecovery(client, entry, ensureSameView, wait =>
+        panel.update({ stage: 'images', retrying: 1, etaMs: null,
+          message: `原图 ${index + 1}/${plan.entries.length} 暂时失败，${Math.ceil(wait.delayMs / 1000)} 秒后进行第 ${wait.recoveryRounds} 轮恢复…` }));
+      const name = originalImages.filename(entry.originalName, asset.blob.type,
+        entry.sequence - 1, imageNumbering.WIDTH);
+      const imageDataUrl = await blobToDataUrl(asset.blob);
+      let receipt = null;
+      record.downloadId = await requestDownload(imageDataUrl, name, folder, {
+        kind: 'retry-image', conflictAction: 'overwrite', workerTimeoutMs: 90000,
+        ...(entry.groupName === '未解析' ? { unresolved: true } :
+          entry.groupNumber !== undefined ? { groupNumber: entry.groupNumber } :
+            entry.groupName ? { groupName: entry.groupName } : {}),
+        fallbackName: originalImages.filename(entry.fileId.slice(0, 64), asset.blob.type,
+          entry.sequence - 1, imageNumbering.WIDTH),
+        onAccepted: value => { receipt = value; }
+      });
+      Object.assign(record, { name: receipt?.filename || name,
+        relativePath: receipt?.relativePath || `${folder}/${entry.groupName ? entry.groupName + '/' : ''}${name}`,
+        bytes: asset.blob.size, mimeType: asset.blob.type, width: asset.width, height: asset.height,
+        sha256: await originalImages.fingerprint(asset.blob), source: asset.source,
+        verification: asset.verification, validation: asset.validation,
+        retrievalAttempts: asset.retrievalAttempts, retrievalErrors: asset.retrievalErrors,
+        recoveryRounds: asset.recoveryRounds, warnings: asset.warnings || [], status: 'queued' });
+      results.queued++;
+      if (entry.groupName === '未解析' && entry.conversationId) {
+        await persistPromptRetryCheckpoint({ extensionVersion, createdAt: new Date().toISOString(),
+          page: plan.page, scope: plan.scope, processedFileIds: [entry.fileId], images: [record] }, folder);
+      }
+    } catch (error) {
+      record.error = error.message;
+      record.retrievalAttempts = error.retrievalAttempts;
+      record.retrievalErrors = error.details;
+      record.recoveryRounds = error.recoveryRounds || 0;
+      results.failed++;
+    }
+    results.images.push(record);
+    panel.update({ stage: 'images', total: plan.entries.length, completed: index + 1,
+      active: index + 1 < plan.entries.length ? 1 : 0, queued: results.queued,
+      failed: results.failed, retrying: 0, etaMs: null,
+      message: `原图重试 ${index + 1}/${plan.entries.length} · ${results.queued} 成功 · ${results.failed} 仍失败` });
+  }
+  results.imageRetryCheckpoint = await persistImageRetryCheckpoint(results, folder);
+  const reportName = `chatgpt-image-retry-results-${Date.now()}.json`;
+  await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)),
+    reportName, folder);
+  panel.update({ stage: 'images', total: plan.entries.length, completed: plan.entries.length,
+    active: 0, finished: true, queued: results.queued, failed: results.failed, retrying: 0,
+    phase: results.failed ? 'completed with issues' : 'complete', etaMs: null,
+    message: `原图定向重试完成：${results.queued} 张已排队，${results.failed} 张仍失败。未重新下载已成功图片；详见 ${reportName}。` });
 }
 
 async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status }) {
@@ -287,24 +463,57 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
     ensureSameView();
     const entry = plan.entries[i], record = collected.records[i];
     const item = { sequence: entry.sequence, fileId: entry.fileId,
-      conversationId: entry.conversationId, imageRelativePath: `${folder}/未解析/${entry.imageName}`,
+      conversationId: entry.conversationId, imageRelativePath: entry.previousRelativePath,
+      sourceDownloadId: entry.sourceDownloadId,
       previousError: entry.previousError, promptStatus: record?.status || 'unresolved',
       promptError: record?.status === 'resolved' ? null : record?.error || { code: 'missing_result', message: 'No prompt result returned' },
       ...(record?.diagnostic ? { diagnostic: record.diagnostic } : {}) };
     if (record?.status === 'resolved' && typeof record.cumulativePrompt === 'string' && record.cumulativePrompt.trim()) {
-      const name = promptRetry.promptFileName(entry.sequence);
-      item.promptRelativePath = `${folder}/未解析/${name}`;
+      const group = promptGroups.groupIdentity(record.cumulativePrompt);
+      item.groupName = group.groupName;
+      item.promptRelativePath = `${folder}/${group.groupName}/prompt.txt`;
       item.promptSource = promptSource(record);
       try {
-        const saved = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(record.cumulativePrompt),
-          name, folder, { kind: 'retry-prompt', unresolved: true, retrySequence: entry.sequence, conflictAction: 'overwrite' }, ensureSameView);
+        if (!Number.isInteger(entry.sourceDownloadId)) {
+          throw new Error('Cannot replace the previous unresolved image because its Chrome download ID is missing');
+        }
+        const saved = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
+          'prompt.txt', folder, { kind: 'prompt', groupName: group.groupName, conflictAction: 'overwrite' }, ensureSameView);
         item.promptDownloadId = saved.downloadId;
-        item.saveAttempts = saved.attempts;
+        item.promptSaveAttempts = saved.attempts;
+        results.imageDownloadsRequested++;
+        const asset = await resolveOriginalForRecovery(client, entry, ensureSameView, wait =>
+          panel.update({ stage: 'images', etaMs: null,
+            message: `原图暂时失败，${Math.ceil(wait.delayMs / 1000)} 秒后进行第 ${wait.recoveryRounds} 轮恢复…` }));
+        const imageName = originalImages.filename(entry.imageName, asset.blob.type, entry.sequence - 1, imageNumbering.WIDTH);
+        const imageDataUrl = await blobToDataUrl(asset.blob);
+        let replacementReceipt = null;
+        item.imageDownloadId = await requestDownload(imageDataUrl, imageName, folder, {
+          kind: 'relocate-image', conflictAction: 'overwrite', groupName: group.groupName, workerTimeoutMs: 90000,
+          ...(Number.isInteger(entry.sourceDownloadId) ? { replaceDownloadId: entry.sourceDownloadId } : {}),
+          fallbackName: originalImages.filename(entry.fileId.slice(0, 64), asset.blob.type,
+            entry.sequence - 1, imageNumbering.WIDTH),
+          onAccepted: receipt => { replacementReceipt = receipt; }
+        });
+        item.imageName = replacementReceipt?.filename || imageName;
+        item.imageRelativePath = replacementReceipt?.relativePath || `${folder}/${group.groupName}/${item.imageName}`;
+        item.sourceDownloadId = item.imageDownloadId;
+        item.previousDownloadId = entry.sourceDownloadId;
+        item.cleanupStatus = Number.isInteger(entry.sourceDownloadId)
+          ? replacementReceipt?.cleanupStatus || 'replacement-completed' : 'source-download-id-missing';
+        item.retrievalAttempts = asset.retrievalAttempts;
+        item.retrievalErrors = asset.retrievalErrors;
+        item.recoveryRounds = asset.recoveryRounds;
         item.saveStatus = 'queued';
+        item.exactPlacement = true;
         results.recovered++;
       } catch (error) {
         item.saveStatus = 'failed'; item.saveError = error.message;
-        item.saveAttempts = error.saveAttempts || 3; results.saveFailed++;
+        item.saveAttempts = error.saveAttempts || item.promptSaveAttempts || 3;
+        item.retrievalAttempts = error.retrievalAttempts;
+        item.retrievalErrors = error.details;
+        item.recoveryRounds = error.recoveryRounds;
+        results.saveFailed++;
       }
     } else results.unresolved++;
     results.images.push(item);
@@ -406,6 +615,11 @@ function addBulkDownloadButton() {
       panel.update({ mode: concurrency === 'auto' ? 'auto' : 'manual' });
       repaintPanel = () => panel.update({ ...meter.snapshot(), elapsedMs: Date.now() - panelStarted, etaMs: null });
       panelTimer = setInterval(() => repaintPanel(), 500);
+      if (selectedImageRetryPlan) {
+        await retryFailedImages(selectedImageRetryPlan, { folder: DOWNLOAD_FOLDER, ensureSameView, panel, status });
+        btn.disabled = false;
+        return;
+      }
       if (selectedRetryPlan) {
         await retryFailedPrompts(selectedRetryPlan, { folder: DOWNLOAD_FOLDER, ensureSameView, panel, status });
         btn.disabled = false;
@@ -638,18 +852,6 @@ function addBulkDownloadButton() {
             total: files.length, totalImages: numbering.all.length, resolvedImages: numbering.all.length - grouping.unresolvedCount,
             promptErrors: grouping.unresolvedCount,
             message: `全库 ${numbering.all.length} 张 · ${grouping.groupCount} 个提示词组 · 本次 ${files.length} 张 / ${grouping.selectedGroupCount} 组 · ${grouping.selectedUnresolvedCount} 张放入“未解析”` });
-          // Save recoverable identities before the potentially long image stage.
-          // The final checkpoint is reconciled with actual queued image results.
-          if (files.length) promptExport.retryCheckpoint = await persistPromptRetryCheckpoint({
-              extensionVersion, createdAt: new Date().toISOString(), page: startUrl, scope,
-              processedFileIds: files.map(entry => entry.fileId),
-              images: files.filter(entry => entry.unresolved).map(entry => ({
-                sequence: entry.sequence, fileId: entry.fileId,
-                conversationId: entry.prompt?.conversationId,
-                imageRelativePath: `${DOWNLOAD_FOLDER}/未解析/${originalImages.filename(entry.name, 'image/png', entry.sequence - 1, imageNumbering.WIDTH)}`,
-                promptStatus: 'unresolved', promptError: entry.promptError
-              }))
-            }, DOWNLOAD_FOLDER);
         } catch (error) {
           ensureSameView();
           promptExport.status = 'blocked';
@@ -677,7 +879,7 @@ function addBulkDownloadButton() {
             relativePath: `${DOWNLOAD_FOLDER}/${group.groupName}/prompt.txt`, status: 'failed' };
           try {
             const receipt = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
-              'prompt.txt', DOWNLOAD_FOLDER, { groupNumber: group.groupNumber, kind: 'prompt', conflictAction: 'overwrite' }, ensureSameView);
+              'prompt.txt', DOWNLOAD_FOLDER, { groupName: group.groupName, kind: 'prompt', conflictAction: 'overwrite' }, ensureSameView);
             saved.downloadId = receipt.downloadId;
             saved.attempts = receipt.attempts;
             saved.status = 'queued';
@@ -815,7 +1017,7 @@ function addBulkDownloadButton() {
             ensureSameView();
             record.relativePath = `${DOWNLOAD_FOLDER}/${savePrompts ? entry.groupName + '/' : ''}${name}`;
             record.downloadId = await requestDownload(imageDataUrl, name, DOWNLOAD_FOLDER, {
-              ...(savePrompts ? { groupNumber: entry.groupNumber, unresolved: entry.unresolved } : {}),
+              ...(savePrompts ? { groupName: entry.unresolved ? undefined : entry.groupName, unresolved: entry.unresolved } : {}),
               fallbackName: originalImages.filename(entry.fileId.slice(0, 64), asset.blob.type, entry.sequence - 1, imageNumbering.WIDTH),
               onAccepted: receipt => {
                 record.requestedName = name;
@@ -827,6 +1029,10 @@ function addBulkDownloadButton() {
             record.status = 'queued';
             results.queued++;
             if (record.warnings.length) results.warnings++;
+            if (savePrompts && entry.unresolved && record.promptSource?.conversationId) {
+              await persistPromptRetryCheckpoint({ extensionVersion, createdAt: new Date().toISOString(),
+                page: startUrl, scope, processedFileIds: [record.fileId], images: [record] }, DOWNLOAD_FOLDER);
+            }
           } catch (error) {
             record.error = error?.message || String(error);
             record.retrievalAttempts = error?.retrievalAttempts || record.retrievalAttempts;
@@ -867,6 +1073,9 @@ function addBulkDownloadButton() {
       panel.update({ phase: 'finalizing', active: 0, etaMs: null, message: 'Writing the results report…' });
       if (savePrompts && results.images.length) {
         results.promptRetryCheckpoint = await persistPromptRetryCheckpoint(results, DOWNLOAD_FOLDER);
+      }
+      if (results.images.length) {
+        results.imageRetryCheckpoint = await persistImageRetryCheckpoint(results, DOWNLOAD_FOLDER);
       }
       await exportJson(results, reportName);
       btn.textContent = files.length
@@ -921,6 +1130,7 @@ function downloadDialogTheme() {
 async function chooseDownloadLocation() {
   selectedSavePrompts = false; // Per-dialog opt-in, never a stored preference.
   selectedRetryPlan = null;
+  selectedImageRetryPlan = null;
   return new Promise((resolve) => {
     let modal, themeObserver, systemTheme, syncTheme;
     const previousFocus = document.activeElement;
@@ -1056,6 +1266,7 @@ async function chooseDownloadLocation() {
             </div>
             <div class="prompt-option">
               <label for="bulk-dl-retry-report">仅重试上次失败的提示词（可选）</label>
+              <button type="button" class="prompt-toggle" id="bulk-dl-retry-images" hidden></button>
               <button type="button" class="prompt-toggle" id="bulk-dl-retry-saved" hidden></button>
               <input type="file" id="bulk-dl-retry-report" />
               <p class="hint">插件会自动保存本页最近一次未解析清单，并在这里提供一键重试；也可手动选择旧下载结果或 prompt-retry-results JSON。重试不重新下载图片。</p>
@@ -1101,7 +1312,10 @@ async function chooseDownloadLocation() {
       const promptsButton = root.querySelector('#bulk-dl-prompts');
       const retryInput = root.querySelector('#bulk-dl-retry-report');
       const savedRetryButton = root.querySelector('#bulk-dl-retry-saved');
+      const savedImageRetryButton = root.querySelector('#bulk-dl-retry-images');
       let savedRetryReport = null, useSavedRetry = false;
+      let savedImageRetryPlan = null, useSavedImageRetry = false;
+      let manualImageRetryPlan = null;
       const setRetryControls = retryOnly => {
         root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '仅重试提示词' : 'Start download';
         afterInput.disabled = retryOnly;
@@ -1112,17 +1326,25 @@ async function chooseDownloadLocation() {
       retryInput.onchange = async () => {
         const retryOnly = retryInput.files?.length > 0;
         useSavedRetry = false;
+        useSavedImageRetry = false;
+        manualImageRetryPlan = null;
         savedRetryButton.setAttribute('aria-pressed', 'false');
+        savedImageRetryButton.setAttribute('aria-pressed', 'false');
         setRetryControls(retryOnly);
         errorText.textContent = '';
         if (retryOnly) {
           try {
             const report = JSON.parse(await retryInput.files[0].text());
             if (finished || !retryInput.files?.length) return;
-            const path = report.images?.find(item => item?.promptStatus === 'unresolved' || item?.saveStatus === 'failed');
+            const path = report.images?.find(item => item?.promptStatus === 'unresolved' || item?.saveStatus === 'failed') ||
+              report.images?.find(item => typeof item?.relativePath === 'string');
             const relativePath = report.kind === 'prompt-retry-results' ? path?.imageRelativePath : path?.relativePath;
             const reportFolder = typeof relativePath === 'string' ? relativePath.split('/')[0] : '';
             if (reportFolder && /^[^\\/\x00-\x1f]+$/.test(reportFolder)) input.value = reportFolder;
+            manualImageRetryPlan = planImageRetryFromReport(report, input.value || reportFolder, location.href);
+            if (manualImageRetryPlan) {
+              root.querySelector('#bulk-dl-ok').textContent = `仅重试 ${manualImageRetryPlan.entries.length} 张失败原图`;
+            }
           } catch (_) { errorText.textContent = '无法读取所选结果 JSON。'; }
         }
       };
@@ -1143,9 +1365,24 @@ async function chooseDownloadLocation() {
       savedRetryButton.onclick = () => {
         if (!savedRetryReport) return;
         useSavedRetry = true;
+        useSavedImageRetry = false;
         savedRetryButton.setAttribute('aria-pressed', 'true');
+        savedImageRetryButton.setAttribute('aria-pressed', 'false');
         retryInput.value = '';
         input.value = savedRetryReport.folder;
+        setRetryControls(true);
+        errorText.textContent = '';
+        if (okBtn.disabled) startSavedWhenReady = true;
+        else okBtn.click();
+      };
+      savedImageRetryButton.onclick = () => {
+        if (!savedImageRetryPlan) return;
+        useSavedImageRetry = true;
+        useSavedRetry = false;
+        savedImageRetryButton.setAttribute('aria-pressed', 'true');
+        savedRetryButton.setAttribute('aria-pressed', 'false');
+        retryInput.value = '';
+        input.value = savedImageRetryPlan.folder;
         setRetryControls(true);
         errorText.textContent = '';
         if (okBtn.disabled) startSavedWhenReady = true;
@@ -1161,6 +1398,15 @@ async function chooseDownloadLocation() {
           savedRetryButton.setAttribute('aria-pressed', 'false');
         } catch (_) { /* Invalid or stale checkpoints remain hidden. */ }
       }).catch(() => {});
+      sendToWorker({ action: 'getImageRetryCheckpoint', page: location.href }).then(response => {
+        if (finished || response.status !== 'found' || !response.checkpoint) return;
+        try {
+          savedImageRetryPlan = planImageRetry(response.checkpoint, location.href);
+          savedImageRetryButton.hidden = false;
+          savedImageRetryButton.textContent = `↻ 一键重试上次失败的 ${savedImageRetryPlan.entries.length} 张原图`;
+          savedImageRetryButton.setAttribute('aria-pressed', 'false');
+        } catch (_) { /* Invalid or stale checkpoints remain hidden. */ }
+      }).catch(() => {});
       input.value = 'chatgpt-images';
       parallelInput.value = String(downloadQueue.DEFAULT_CONCURRENCY);
       parallelInput.disabled = true;
@@ -1169,7 +1415,7 @@ async function chooseDownloadLocation() {
       okBtn.disabled = true;
       sendToWorker({ action: 'getDownloadFolder' }).then(resp => {
         if (finished) return;
-        if (!retryInput.files?.length && !useSavedRetry) input.value = resp.folder || 'chatgpt-images';
+        if (!retryInput.files?.length && !useSavedRetry && !useSavedImageRetry) input.value = resp.folder || 'chatgpt-images';
         const saved = downloadQueue.normalizeConcurrency(resp.concurrency);
         modeInput.value = saved === 'auto' ? 'auto' : 'manual';
         parallelInput.value = String(saved === 'auto' ? downloadQueue.DEFAULT_CONCURRENCY : saved);
@@ -1179,7 +1425,7 @@ async function chooseDownloadLocation() {
       }).finally(() => {
         if (finished) return;
         input.disabled = false;
-        setRetryControls(useSavedRetry || retryInput.files?.length > 0);
+        setRetryControls(useSavedRetry || useSavedImageRetry || retryInput.files?.length > 0);
         okBtn.disabled = false;
         if (startSavedWhenReady) { startSavedWhenReady = false; okBtn.click(); return; }
         input.focus();
@@ -1213,25 +1459,30 @@ async function chooseDownloadLocation() {
             try { retryReport = JSON.parse(await retryFile.text()); }
             catch (_) { throw new Error('所选文件不是有效 JSON。'); }
           }
-          const after = retryReport ? 0 : imageNumbering.parseBoundary(afterInput.value);
+          const after = retryReport || useSavedImageRetry ? 0 : imageNumbering.parseBoundary(afterInput.value);
           const concurrency = modeInput.value === 'auto' ? 'auto' : Number(parallelInput.value);
-          if (!retryReport && concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
+          if (!retryReport && !useSavedImageRetry && concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
             throw new Error('Choose a whole number of parallel downloads from 1 to 12');
           }
           // Validate the imported report and target directory before persisting
           // settings or making any authenticated conversation requests.
           const requestedFolder = input.value || 'chatgpt-images';
-          if (retryReport && originalImages.sanitizeSegment(requestedFolder, 'chatgpt-images') !== requestedFolder) {
+          if ((retryReport || useSavedImageRetry) && originalImages.sanitizeSegment(requestedFolder, 'chatgpt-images') !== requestedFolder) {
             throw new Error('目录名包含不支持的字符，请使用旧结果目录的原始名称。');
           }
-          const retryPlan = retryReport ? promptRetry.plan(retryReport, requestedFolder, location.href) : null;
+          const imageRetryPlan = retryReport ? planImageRetryFromReport(retryReport, requestedFolder, location.href) :
+            useSavedImageRetry ? savedImageRetryPlan : null;
+          const retryPlan = retryReport && !imageRetryPlan
+            ? promptRetry.plan(retryReport, requestedFolder, location.href) : null;
           const resp = await sendToWorker({ action: 'setDownloadFolder', folder: input.value || 'chatgpt-images', concurrency });
           if (resp.status !== 'saved' || !resp.folder) throw new Error('Folder could not be saved');
           if (retryPlan && resp.folder !== retryPlan.folder) throw new Error('目录名包含不支持的字符，请使用旧结果目录的原始名称。');
+          if (imageRetryPlan && resp.folder !== imageRetryPlan.folder) throw new Error('原图重试目录与检查点不匹配。');
           selectedConcurrency = downloadQueue.normalizeConcurrency(resp.concurrency ?? concurrency);
           selectedAfterSequence = after;
           selectedSavePrompts = savePrompts;
           selectedRetryPlan = retryPlan;
+          selectedImageRetryPlan = imageRetryPlan;
           finish(resp.folder);
         } catch (error) {
           errorText.textContent = error.message;

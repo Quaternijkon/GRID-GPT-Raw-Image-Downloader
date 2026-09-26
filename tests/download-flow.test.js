@@ -3,6 +3,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const crypto = require('node:crypto').webcrypto;
+const promptGroups = require('../prompt-groups.js');
 
 // Synthetic mapping contracts only; these fixtures do not establish live API compatibility.
 const fixtureFileId = index => index === 0 ? 'file_abc123' : `file_img${index}`;
@@ -73,7 +74,7 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
     createElement() { return { style: {}, remove() {} }; }
   };
   const context = vm.createContext({
-    chrome, document, console, URL, Blob, Response, AbortController, crypto,
+    chrome, document, console, URL, Blob, Response, AbortController, TextEncoder, crypto,
     getComputedStyle: () => ({ overflowY: 'auto' }),
     location: { pathname: '/images/', href: 'https://chatgpt.com/images/' },
     localStorage: { getItem() { return null; } },
@@ -308,12 +309,13 @@ test('grouped increment resolves full history, reuses group zero and writes one 
   assert.equal(report.images[0].promptSource.conversationId, 'conversation-a');
   const prompts = downloads.filter(item => item.url.startsWith('data:text/plain'));
   assert.equal(prompts.length, 1);
-  assert.equal(prompts[0].filename, 'original-quality-test/0000/prompt.txt');
+  const repeatedGroup = promptGroups.groupIdentity('相同提示词').groupName;
+  assert.equal(prompts[0].filename, `original-quality-test/${repeatedGroup}/prompt.txt`);
   assert.equal(prompts[0].conflictAction, 'overwrite');
   assert.equal(decodeURIComponent(prompts[0].url.split(',').slice(1).join(',')), '相同提示词\n');
   const images = downloads.filter(item => item.url.startsWith('data:image/'));
   assert.equal(images.length, 1);
-  assert.equal(images[0].filename, 'original-quality-test/0000/000003-Original 2.png');
+  assert.equal(images[0].filename, `original-quality-test/${repeatedGroup}/000003-Original 2.png`);
   assert.equal(images[0].conflictAction, 'uniquify');
   assert.deepEqual(Buffer.from(images[0].url.split(',')[1], 'base64'), imageBytes);
   assert.ok(downloads.indexOf(prompts[0]) < downloads.indexOf(images[0]));
@@ -385,7 +387,8 @@ test('mixed known and unknown prompts preserve global filenames and original byt
   const { downloads, report, imageBytes } = await runFlow({ gallerySize: 3, promptRecords: promptFixtureRecords,
     savePrompts: true, unresolvedPrompts: [1] });
   assert.equal(report.queued, 3);
-  assert.deepEqual(report.images.map(item => item.groupName), ['0000', '未解析', '0000']);
+  const repeatedGroup = promptGroups.groupIdentity('相同提示词').groupName;
+  assert.deepEqual(report.images.map(item => item.groupName), [repeatedGroup, '未解析', repeatedGroup]);
   assert.equal(report.images[1].promptError.code, 'target_not_found');
   assert.equal(report.warnings, 1);
   const unknown = downloads.find(item => item.filename.includes('/未解析/'));

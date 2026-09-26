@@ -1,8 +1,9 @@
-/* Exact-text, full-collection grouping. No persisted index or network access. */
+/* Exact-text grouping with content-addressed directory identities. */
 (() => {
-  const RULE_VERSION = 'exact-cumulative-prompt-first-occurrence-v2-unresolved';
+  const RULE_VERSION = 'exact-cumulative-prompt-content-addressed-v3-unresolved';
   const UNRESOLVED_FOLDER = '未解析';
   const segment = value => typeof value === 'string' ? value : value?.text;
+  const MASK_64 = (1n << 64n) - 1n;
 
   function normalizePrompt(base, editSteps = []) {
     if (!Array.isArray(editSteps)) throw new Error('Prompt edits must be an ordered array');
@@ -15,6 +16,21 @@
     const error = new Error(`Cannot assign stable prompt groups: ${message}`);
     error.promptIssues = issues;
     return error;
+  }
+
+  function groupIdentity(text) {
+    if (typeof text !== 'string' || !text) throw new Error('Prompt group identity requires normalized text');
+    const bytes = new TextEncoder().encode(text);
+    let forward = 0xcbf29ce484222325n, reverse = 0x84222325cbf29ce4n;
+    for (const byte of bytes) {
+      forward = ((forward ^ BigInt(byte)) * 0x100000001b3n) & MASK_64;
+    }
+    for (let index = bytes.length - 1; index >= 0; index--) {
+      reverse = ((reverse ^ BigInt(bytes[index])) * 0x100000001b3n) & MASK_64;
+    }
+    const hex = value => value.toString(16).padStart(16, '0');
+    const groupName = `p-${hex(forward)}${hex(reverse)}-${bytes.length.toString(16)}`;
+    return { groupName, promptText: `${text}\n`, text };
   }
 
   function plan(allEntries, resolvedRecords, { afterSequence = 0 } = {}) {
@@ -54,7 +70,7 @@
         prepared.push({ entry, record, promptError });
       }
     }
-    const groups = [], byText = new Map(), all = [];
+    const groups = [], byText = new Map(), byName = new Map(), all = [];
     for (const { entry, record, text, promptError } of prepared) {
       if (promptError) {
         all.push({ ...entry, groupNumber: undefined, groupName: UNRESOLVED_FOLDER,
@@ -65,9 +81,14 @@
       }
       let group = byText.get(text);
       if (!group) {
+        const identity = groupIdentity(text);
+        if (byName.has(identity.groupName) && byName.get(identity.groupName).text !== text) {
+          throw fail('prompt directory identity collision');
+        }
         const groupNumber = groups.length;
-        group = { groupNumber, groupName: String(groupNumber).padStart(4, '0'), text, promptText: `${text}\n`, entries: [] };
+        group = { groupNumber, ...identity, entries: [] };
         byText.set(text, group);
+        byName.set(group.groupName, group);
         groups.push(group);
       }
       const grouped = { ...entry, unresolved: false, groupNumber: group.groupNumber, groupName: group.groupName, cumulativePrompt: text, prompt: record };
@@ -82,7 +103,7 @@
       unresolvedFolder: UNRESOLVED_FOLDER, groupCount: groups.length, selectedGroupCount: selectedGroups.length };
   }
 
-  const api = { RULE_VERSION, UNRESOLVED_FOLDER, normalizePrompt, plan };
+  const api = { RULE_VERSION, UNRESOLVED_FOLDER, normalizePrompt, groupIdentity, plan };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   if (typeof globalThis !== 'undefined') globalThis.ChatGPTPromptGroups = api;
 })();

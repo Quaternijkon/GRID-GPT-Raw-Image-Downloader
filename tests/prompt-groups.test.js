@@ -16,7 +16,8 @@ test('exact text reuse crosses conversations, preserving global queue order', ()
   const result = groups.plan(input, records(['P', 'P\n\nE', 'P', 'p']));
   assert.deepEqual(result.all.map(x => x.groupNumber), [0, 1, 0, 2]);
   assert.deepEqual(result.selected.map(x => x.sequence), [1, 2, 3, 4]);
-  assert.deepEqual(result.groups.map(x => x.groupName), ['0000', '0001', '0002']);
+  assert.deepEqual(result.groups.map(x => x.groupName),
+    ['P', 'P\n\nE', 'p'].map(text => groups.groupIdentity(text).groupName));
   assert.equal(result.groups[0].promptText, 'P\n');
   assert.equal(result.groups[1].promptText, 'P\n\nE\n');
   assert.equal(input[0].groupNumber, undefined);
@@ -24,7 +25,9 @@ test('exact text reuse crosses conversations, preserving global queue order', ()
 
 test('incremental filtering follows full grouping and reuses old prompt groups', () => {
   const result = groups.plan(entries(5), records(['P', 'Q', 'P', 'P', 'R']), { afterSequence: 3 });
-  assert.deepEqual(result.selected.map(x => [x.sequence, x.groupName]), [[4, '0000'], [5, '0002']]);
+  assert.deepEqual(result.selected.map(x => [x.sequence, x.groupName]), [
+    [4, groups.groupIdentity('P').groupName], [5, groups.groupIdentity('R').groupName]
+  ]);
   assert.deepEqual(result.selectedGroups.map(x => x.groupNumber), [0, 2]);
   assert.equal(result.groupCount, 3);
   assert.equal(result.selectedGroupCount, 2);
@@ -49,7 +52,7 @@ test('unknown, empty, duplicate and invalid prompts only isolate affected images
     assert.equal(result.all[0].groupNumber, undefined);
     assert.ok(result.all[0].promptError.message);
     assert.equal(result.all[0].cumulativePrompt, null);
-    assert.equal(result.all[1].groupName, '0000');
+    assert.equal(result.all[1].groupName, groups.groupIdentity('Q').groupName);
     assert.equal(result.groups.length, 1);
     assert.equal(result.groups[0].text, 'Q');
   }
@@ -70,7 +73,8 @@ test('unknown history and selected unknowns preserve cutoff and resolved prompt 
   input[1] = { fileId: 'file_1', status: 'unresolved', error: { code: 'http_error', message: 'HTTP 429' } };
   input[3] = { fileId: 'file_3', status: 'unresolved', error: { code: 'conversation_deferred', message: 'Deferred' } };
   const result = groups.plan(entries(4), input, { afterSequence: 2 });
-  assert.deepEqual(result.selected.map(x => [x.sequence, x.groupName]), [[3, '0000'], [4, '未解析']]);
+  assert.deepEqual(result.selected.map(x => [x.sequence, x.groupName]),
+    [[3, groups.groupIdentity('P').groupName], [4, '未解析']]);
   assert.equal(result.selectedUnresolvedCount, 1);
   assert.equal(result.selectedGroups.length, 1);
   assert.equal(result.all[1].promptError.code, 'http_error');
@@ -83,10 +87,11 @@ test('requires complete global order and valid exclusive boundaries', () => {
   assert.deepEqual(groups.plan([], []).groups, []);
 });
 
-test('folder width is a minimum, independent of final group count', () => {
+test('folder identity is stable and independent of collection order or size', () => {
   const count = 10001;
   const result = groups.plan(entries(count), records(Array.from({ length: count }, (_, i) => `P${i}`)));
-  assert.equal(result.groups[0].groupName, '0000');
-  assert.equal(result.groups[9999].groupName, '9999');
-  assert.equal(result.groups[10000].groupName, '10000');
+  assert.equal(result.groups[0].groupName, groups.groupIdentity('P0').groupName);
+  assert.equal(result.groups[9999].groupName, groups.groupIdentity('P9999').groupName);
+  assert.equal(result.groups[10000].groupName, groups.groupIdentity('P10000').groupName);
+  assert.equal(groups.groupIdentity('P').groupName, groups.plan(entries(1), records(['P'])).groups[0].groupName);
 });

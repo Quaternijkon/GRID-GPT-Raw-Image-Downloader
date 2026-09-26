@@ -11,7 +11,9 @@ function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
     downloads: { download(opts, callback) {
       if (downloadHook) downloadHook(opts, callback, chrome);
       else callback(downloadId);
-    } },
+    }, search(query, callback) { callback([{ id: query.id, state: 'complete' }]); },
+    cancel(_id, callback) { callback(); }, removeFile(_id, callback) { callback(); },
+    erase(query, callback) { callback([{ id: query.id }]); } },
     storage: { local: {
       set(data, callback) {
         if (storageError) chrome.runtime.lastError = { message: 'Storage unavailable' };
@@ -23,7 +25,7 @@ function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
       }
     } }
   };
-  const context = vm.createContext({ chrome, console, URL });
+  const context = vm.createContext({ chrome, console, URL, setTimeout, clearTimeout, Date });
   context.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), context);
   return message => new Promise(resolve => listener(message, { url: 'https://chatgpt.com/images' }, resolve));
@@ -105,6 +107,7 @@ test('prompt retry checkpoints are validated, scoped by page and replaceable', a
     createdAt: '2026-09-26T00:00:00Z', page: 'https://chatgpt.com/images/', scope: 'generated-images',
     folder: 'images', images: [{ sequence: 68, fileId: 'file_000000003f9071fdaeb1333ac2b5a412',
       conversationId: '6a0ec392-502c-8332-8013-ca4f1df10cb5',
+      sourceDownloadId: 68,
       imageRelativePath: 'images/未解析/000068-example.png', promptStatus: 'unresolved',
       promptError: { code: 'target_not_found', message: 'Missing' } }] };
   assert.equal((await send({ action: 'savePromptRetryCheckpoint', checkpoint })).count, 1);
@@ -116,6 +119,19 @@ test('prompt retry checkpoints are validated, scoped by page and replaceable', a
   assert.equal((await send({ action: 'savePromptRetryCheckpoint', checkpoint: { ...checkpoint, images: [] },
     processedFileIds: [checkpoint.images[0].fileId] })).count, 0);
   assert.equal((await send({ action: 'getPromptRetryCheckpoint', page: checkpoint.page })).checkpoint, null);
+});
+
+test('failed original checkpoints retain exact destination groups and clear recovered identities', async () => {
+  const send = worker();
+  const checkpoint = { schemaVersion: 1, kind: 'image-retry-checkpoint', extensionVersion: '1.9.18',
+    createdAt: '2026-09-27T00:00:00Z', page: 'https://chatgpt.com/images/', scope: 'generated-images',
+    folder: 'images', savePrompts: true, images: [{ sequence: 5, fileId: 'file_000000003f9071fdaeb1333ac2b5a412',
+      originalName: 'example.png', groupName: 'p-0123456789abcdef0123456789abcdef-a', promptStatus: 'resolved' }] };
+  assert.equal((await send({ action: 'saveImageRetryCheckpoint', checkpoint })).count, 1);
+  assert.equal((await send({ action: 'getImageRetryCheckpoint', page: checkpoint.page })).checkpoint.images[0].groupName,
+    checkpoint.images[0].groupName);
+  assert.equal((await send({ action: 'saveImageRetryCheckpoint', checkpoint: { ...checkpoint, images: [] },
+    processedFileIds: [checkpoint.images[0].fileId] })).count, 0);
 });
 
 // Prompt export regression definitions only; not executed during implementation.
@@ -156,6 +172,32 @@ test('only fixed UTF-8 prompt.txt inside a numeric group can overwrite', async (
   }
 });
 
+test('content-addressed prompt groups and completed replacement cleanup preserve the final path', async () => {
+  const calls = [];
+  const send = worker({ downloadHook: (opts, callback) => { calls.push(opts); callback(91); } });
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const prompt = await send({ action: 'downloadFile', kind: 'prompt', folder: 'images', groupName,
+    name: 'prompt.txt', conflictAction: 'overwrite', url: 'data:text/plain;charset=utf-8,P' });
+  assert.equal(prompt.relativePath, `images/${groupName}/prompt.txt`);
+  const image = await send({ action: 'downloadFile', kind: 'relocate-image', conflictAction: 'overwrite',
+    folder: 'images', groupName, name: '000068-example.png', replaceDownloadId: 12,
+    url: 'data:image/png;base64,AA==' });
+  assert.equal(image.relativePath, `images/${groupName}/000068-example.png`);
+  assert.equal(image.replacementCompleted, true);
+  assert.equal(image.cleanupStatus, 'old-file-removed');
+  assert.equal(calls[1].conflictAction, 'overwrite');
+});
+
+test('failed-original retry overwrites the exact destination and waits for completion', async () => {
+  const calls = [];
+  const send = worker({ downloadHook: (opts, callback) => { calls.push(opts); callback(92); } });
+  const result = await send({ action: 'downloadFile', kind: 'retry-image', conflictAction: 'overwrite',
+    folder: 'images', unresolved: true, name: '000068-example.png', url: 'data:image/png;base64,AA==' });
+  assert.equal(result.relativePath, 'images-recovery/未解析/000068-example.png');
+  assert.equal(result.retryCompleted, true);
+  assert.equal(calls[0].conflictAction, 'overwrite');
+});
+
 test('prompt filename rejection has no duplicate-name fallback, image fallback keeps its group', async () => {
   const calls = [];
   const send = worker({ downloadHook: (opts, callback, chrome) => {
@@ -178,7 +220,7 @@ test('unresolved destination is a fixed image-only folder with no overwrite or a
   const send = worker({ downloadHook: (options, callback) => { calls.push(options); callback(12); } });
   const request = { action: 'downloadFile', folder: 'images', unresolved: true,
     name: '000002-image.png', url: 'data:image/png;base64,AA==' };
-  assert.equal((await send(request)).relativePath, 'images/未解析/000002-image.png');
+  assert.equal((await send(request)).relativePath, 'images-recovery/未解析/000002-image.png');
   assert.equal(calls[0].conflictAction, 'uniquify');
   for (const change of [{ groupNumber: 0 }, { unresolved: '../escape' }, { unresolved: false },
     { conflictAction: 'overwrite' }, { url: 'data:application/json,%7B%7D' },
@@ -200,5 +242,5 @@ test('invalid filename retry stays in unresolved and preserves the global prefix
   const result = await send({ action: 'downloadFile', folder: 'images', unresolved: true,
     name: '000002-image.png', fallbackName: '000002-file_test.png', url: 'data:image/png;base64,AA==' });
   assert.equal(result.ok, true);
-  assert.deepEqual(calls, ['images/未解析/000002-image.png', 'images/未解析/000002-file_test.png']);
+  assert.deepEqual(calls, ['images-recovery/未解析/000002-image.png', 'images-recovery/未解析/000002-file_test.png']);
 });

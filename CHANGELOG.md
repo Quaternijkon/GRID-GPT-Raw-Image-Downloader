@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.9.18 — 2026-09-27
+
+- Prompt directories are now content-addressed from the full normalized prompt (`p-<hash>-<length>`). A prompt receives the same directory whether it succeeds initially or is recovered later, independent of other temporarily unresolved prompts.
+- A recovered prompt now recreates the complete successful layout: write the shared `prompt.txt`, retrieve the original bytes, save the image under its final prompt directory and sequence filename, wait for the replacement to complete, then remove the obsolete `未解析` download. Recovery is successful only when placement and cleanup complete.
+- Temporarily unresolved images now live in the sibling `<folder>-recovery/未解析` area rather than inside the final output folder. An empty recovery directory left by the browser therefore cannot change the completed export layout.
+- Terminal original failures are persisted separately. The settings dialog exposes a one-click original-only retry that skips successful images, prompt conversations and gallery pagination. Retry writes with overwrite semantics so an uncertain prior submission cannot create a `(1)` duplicate.
+- Manually imported legacy schema-4 reports prioritize their failed originals and preserve legacy numeric group paths, allowing an interrupted 1.9.16 run to recover only its failed images with its original layout.
+- Prompt and image checkpoints are scoped by both route and output folder. When an unresolved image succeeds during image retry, its new Chrome download ID is merged into the prompt checkpoint so later prompt recovery can replace it safely.
+
 ## 1.9.17 — 2026-09-26
 
 - Preserve transient classification when the original resolver exhausts its three internal endpoint rounds. Previously the adaptive controller saw transient errors, but the task wrapper received an unclassified exception and immediately counted the image as permanently failed.

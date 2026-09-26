@@ -36,21 +36,27 @@
     const sequences = new Set(), fileIds = new Set();
     const entries = unresolved.map(item => {
       const sourceId = priorRetry ? item.conversationId : item.promptSource?.conversationId;
-      const prefix = `${folder}/未解析/`;
+      const prefixes = [`${folder}-recovery/未解析/`, `${folder}/未解析/`];
       const relativePath = priorRetry ? item.imageRelativePath : item.relativePath;
-      const name = priorRetry ? relativePath?.slice(prefix.length) : item.name;
+      const prefix = prefixes.find(value => relativePath?.startsWith(value));
+      const name = priorRetry ? (prefix ? relativePath.slice(prefix.length) : null) : item.name;
       if (!Number.isSafeInteger(item.sequence) || item.sequence < 1 || item.sequence > 999999 ||
           sequences.has(item.sequence) || !FILE_ID.test(item.fileId) || fileIds.has(item.fileId) ||
           !CONVERSATION_ID.test(sourceId) || (!priorRetry && (item.groupName !== '未解析' || item.status !== 'queued')) ||
           !IMAGE_NAME.test(name) || !name.startsWith(String(item.sequence).padStart(6, '0') + '-') ||
-          relativePath !== prefix + name ||
+          !prefix || relativePath !== prefix + name ||
+          !Number.isInteger(priorRetry ? item.sourceDownloadId : item.downloadId) ||
           !(priorRetry ? item.promptError?.code || item.saveStatus === 'failed' : item.promptError?.code)) {
         throw new Error('结果报告存在身份、目录或文件名不一致的未解析记录，已停止重试。');
       }
       sequences.add(item.sequence);
       fileIds.add(item.fileId);
       return { fileId: item.fileId, conversationId: sourceId, sequence: item.sequence,
-        imageName: name, previousError: item.promptError || { code: 'prompt_save_failed', message: item.saveError || 'Prompt file was not saved' } };
+        imageName: name,
+        sourceDownloadId: Number.isInteger(item.sourceDownloadId) ? item.sourceDownloadId
+          : Number.isInteger(item.downloadId) ? item.downloadId : null,
+        previousRelativePath: relativePath,
+        previousError: item.promptError || { code: 'prompt_save_failed', message: item.saveError || 'Prompt file was not saved' } };
     });
     return { folder, sourceReportCreatedAt: report.createdAt || null, sourceExtensionVersion: report.extensionVersion,
       page: previous.href, scope: report.scope, entries, conversationCount: new Set(entries.map(item => item.conversationId)).size };
