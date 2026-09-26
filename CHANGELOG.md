@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.15 — 2026-09-26
+
+- The third pass recovered 25 more prompts, bringing the on-disk total to 85. Five of the 15 remaining images were blocked by historical image pointers that do not use the modern `file_*` identity shape.
+- Opaque historical image pointers may now confirm an image input/output event and advance prompt-round state. They cannot match a requested target, and their raw value is not exported.
+- The third pass requested only the second report's remaining 40 images in 31 conversations, with no HTTP 429 and no original-image downloads. The fourth pass retries only the final 15.
+
 ## 1.9.14 — 2026-09-26
 
 - The second targeted pass recovered and wrote 60 numbered prompt sidecars. Of 40 remaining images, 30 were still blocked by historical field-type variations inside the exact `tether_browsing_display` tool envelope.

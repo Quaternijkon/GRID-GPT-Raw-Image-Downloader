@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const RULE_VERSION = 'reference-or-text-image-rounds-v3-nonimage-attachments';
-  const ADAPTER_VERSION = 'chatgpt-mapping-v8';
+  const ADAPTER_VERSION = 'chatgpt-mapping-v9';
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const string = value => typeof value === 'string' && value.length ? value : null;
   const fail = (code, message, diagnostic) => {
@@ -25,8 +25,10 @@
     if (!part || part.content_type !== 'image_asset_pointer') return null;
     const assetPointer = string(part.asset_pointer);
     const fileId = pointerId(assetPointer);
-    if (!fileId) fail('unsupported_asset', 'Image resource has no supported exact asset identity.');
-    return { assetPointer, fileId };
+    // The content type itself is sufficient to identify an image event in the
+    // ancestry. An opaque historical pointer may reset/finish a round, but it
+    // can never match a requested target without an exact supported file ID.
+    return { assetPointer, fileId, identitySupported: Boolean(fileId) };
   }
 
   function partType(part) {
@@ -143,8 +145,10 @@
             nonImageAttachments.push(mimeClass);
             continue;
           }
-          const identities = ['id', 'file_id', 'fileId', 'asset_pointer'].filter(field => own(attachment, field)).map(field => pointerId(attachment[field]));
-          if (!identities.length || identities.some(identity => !identity || !images.some(image => image.fileId === identity))) {
+          const identities = ['id', 'file_id', 'fileId', 'asset_pointer'].filter(field => own(attachment, field))
+            .map(field => ({ raw: string(attachment[field]), fileId: pointerId(attachment[field]) }));
+          if (!identities.length || identities.some(identity => !identity.raw || !images.some(image =>
+            identity.fileId && image.fileId === identity.fileId || image.assetPointer === identity.raw))) {
             fail('unsupported_attachment', 'User image attachment metadata is not accounted for by supported image parts.', {
               attachmentField: key, attachmentCount: attachments.length,
               attachmentKeys: Object.keys(attachment).filter(name => /^[a-z0-9_]{1,40}$/i.test(name)).slice(0, 20),
@@ -254,7 +258,8 @@
           });
           return { ...snapshot, status: 'resolved', basePrompt: base,
             cumulativePrompt: normalize([base, ...edits.map(edit => edit.text)].join('\n\n')).trim(),
-            taskKind, taskRootMessageId: root, referenceImages: references.map(image => ({ ...image })),
+            taskKind, taskRootMessageId: root, referenceImages: references.map(image => image.identitySupported
+              ? { assetPointer: image.assetPointer, fileId: image.fileId } : { unsupportedIdentity: true }),
             nonImageAttachmentCount, editSteps: edits.map(edit => ({ ...edit })),
             sourceMessageIds: [...sources], outputMessageId: current.id,
             outputAssetId: target.assetPointer, branchPath: [...path] };

@@ -33,6 +33,16 @@ test('new references reset even while waiting; image-only waits for first text',
   assert.deepEqual(a.sourceMessageIds, ['reset', 'text']);
 });
 
+test('opaque historical image pointers affect rounds without becoming target identities', () => {
+  const oldImage = { content_type: 'image_asset_pointer', asset_pointer: 'legacy://opaque-reference' };
+  const c = conversation(node('u', null, 'user', [oldImage, 'P']), output('a', 'u', 'file_a'));
+  const result = resolve(c, 'file_a')[0];
+  assert.equal(result.status, 'resolved');
+  assert.equal(result.cumulativePrompt, 'P');
+  assert.deepEqual(result.referenceImages, [{ unsupportedIdentity: true }]);
+  assert.equal(resolve(c, 'legacy://opaque-reference')[0].error.code, 'target_not_found');
+});
+
 test('sibling branches do not inherit edits and current_node has no influence', () => {
   const c = conversation(base(), output('a', 'u', 'file_a'), node('edit', 'a', 'user', ['E']),
     output('b', 'edit', 'file_b'), output('sibling', 'u', 'file_c'));
