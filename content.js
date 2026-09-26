@@ -869,7 +869,7 @@ async function chooseDownloadLocation() {
             </div>
             <div class="prompt-option">
               <label for="bulk-dl-retry-report">仅重试上次失败的提示词（可选）</label>
-              <input type="file" id="bulk-dl-retry-report" accept=".json,application/json" />
+              <input type="file" id="bulk-dl-retry-report" />
               <p class="hint">选择旧目录中的 chatgpt-images-download-results.json，或上次的 prompt-retry-results JSON。只读取报告内仍未解析的会话，把新提示词写到该目录的“未解析”文件夹；不重新下载图片。上面的目录名须与旧目录完全一致。</p>
             </div>
             <div class="parallel">

@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.9.12 — 2026-09-26
+
+- Removed the native file input's JSON MIME filter after macOS displayed valid result files but disabled the Open action. Imported content still passes the extension's strict schema, route, folder and per-image identity validation before any authenticated request.
+
 ## 1.9.11 — 2026-09-26
 
 - Added a prompt-only retry path that imports the extension's prior schema-4 result, checks page, folder, image identity and unresolved paths, then reads only the failed images' distinct conversations. The original-image discovery and download pipeline is not entered.
