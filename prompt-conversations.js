@@ -18,9 +18,13 @@
     if (['text', 'image', 'application', 'audio', 'video', 'unknown'].includes(value.attachmentMimeClass)) {
       result.attachmentMimeClass = value.attachmentMimeClass;
     }
-    for (const key of ['attachmentKeys', 'partTypes']) {
+    for (const key of ['attachmentKeys', 'partTypes', 'contentKeys']) {
       if (Array.isArray(value[key])) result[key] = value[key]
         .filter(item => typeof item === 'string' && /^[a-z0-9_:-]{1,40}$/i.test(item)).slice(0, 20);
+    }
+    if (['user', 'assistant', 'tool'].includes(value.role)) result.role = value.role;
+    if (typeof value.contentType === 'string' && /^[a-z0-9_:-]{1,60}$/i.test(value.contentType)) {
+      result.contentType = value.contentType;
     }
     return Object.keys(result).length ? result : null;
   }

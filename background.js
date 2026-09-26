@@ -22,14 +22,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const validGroup = hasGroup && Number.isSafeInteger(msg.groupNumber) && msg.groupNumber >= 0;
       const unresolved = msg.unresolved === true;
       const prompt = msg.kind === 'prompt';
-      const validType = typeof msg.url === 'string' && (prompt
+      const retryPrompt = msg.kind === 'retry-prompt';
+      const validRetrySequence = Number.isSafeInteger(msg.retrySequence) && msg.retrySequence >= 1 && msg.retrySequence <= 999999;
+      const validType = typeof msg.url === 'string' && (prompt || retryPrompt
         ? /^data:text\/plain;charset=utf-8(?:;base64)?,/i.test(msg.url)
         : /^data:(?:image\/(?:png|jpeg|webp|gif|avif|bmp)|application\/json)[;,]/i.test(msg.url));
       if (!validType || (hasGroup && !validGroup) ||
           (msg.unresolved !== undefined && !unresolved) ||
-          (unresolved && (hasGroup || prompt || !/^data:image\//i.test(msg.url))) ||
+          (unresolved && (hasGroup || prompt || (!retryPrompt && !/^data:image\//i.test(msg.url)))) ||
+          (retryPrompt && (!unresolved || !validRetrySequence ||
+            msg.name !== `${String(msg.retrySequence).padStart(6, '0')}-prompt.txt` || msg.conflictAction !== 'overwrite')) ||
+          (!retryPrompt && msg.retrySequence !== undefined) ||
           (prompt ? (!validGroup || msg.name !== 'prompt.txt' || msg.conflictAction !== 'overwrite')
-            : (msg.conflictAction !== undefined && msg.conflictAction !== 'uniquify')) ||
+            : (!retryPrompt && msg.conflictAction !== undefined && msg.conflictAction !== 'uniquify')) ||
           msg.overwrite !== undefined ||
           typeof msg.name !== 'string' || !msg.name || /[\\/]/.test(msg.name) ||
           msg.name === '.' || msg.name === '..' ||
@@ -55,7 +60,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         try {
           const relativePath = `${directory}/${name}`;
           chrome.downloads.download({ url: msg.url, filename: relativePath,
-            conflictAction: prompt ? 'overwrite' : 'uniquify' }, downloadId => {
+            conflictAction: prompt || retryPrompt ? 'overwrite' : 'uniquify' }, downloadId => {
             const error = chrome.runtime.lastError;
             if (Number.isInteger(downloadId) && downloadId >= 0) {
               sendResponse({ ok: true, downloadId, filename: name, filenameFallback, relativePath });

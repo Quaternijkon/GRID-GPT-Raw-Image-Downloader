@@ -7,7 +7,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function () {
   'use strict';
   const RULE_VERSION = 'reference-or-text-image-rounds-v3-nonimage-attachments';
-  const ADAPTER_VERSION = 'chatgpt-mapping-v5';
+  const ADAPTER_VERSION = 'chatgpt-mapping-v6';
   const own = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
   const string = value => typeof value === 'string' && value.length ? value : null;
   const fail = (code, message, diagnostic) => {
@@ -99,7 +99,10 @@
     const content = message.content;
     if (role !== 'user' && nonImageContent(content)) return { kind: 'other' };
     if (!content || !['text', 'multimodal_text'].includes(content.content_type) || !Array.isArray(content.parts)) {
-      fail('unsupported_content', 'Message content does not match the supported text/multimodal adapter.');
+      fail('unsupported_content', 'Message content does not match the supported text/multimodal adapter.', {
+        role, contentType: typeof content?.content_type === 'string' ? content.content_type : 'missing',
+        contentKeys: content && typeof content === 'object' && !Array.isArray(content) ? Object.keys(content).slice(0, 20) : []
+      });
     }
     const texts = [];
     const images = [];
@@ -298,7 +301,10 @@
                 mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
                 userTextMessages, referenceInputs, outputMessages
               });
-              if (base === null) fail('missing_base', 'The image task has no initial user text.');
+              if (base === null) fail('missing_base', 'The image task has no initial user text.', {
+                mappingNodes: Object.keys(mapping).length, branchNodes: path.length,
+                userTextMessages, referenceInputs, outputMessages
+              });
               Object.assign(result, { status: 'resolved', basePrompt: base,
                 cumulativePrompt: normalize([base, ...edits.map(edit => edit.text)].join('\n\n')).trim(),
                 taskKind, taskRootMessageId: root, referenceImages: references.map(image => ({ ...image })),

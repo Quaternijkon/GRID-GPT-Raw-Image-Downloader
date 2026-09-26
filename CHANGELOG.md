@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.11 — 2026-09-26
+
+- Added a prompt-only retry path that imports the extension's prior schema-4 result, checks page, folder, image identity and unresolved paths, then reads only the failed images' distinct conversations. The original-image discovery and download pipeline is not entered.
+- Recovered prompts are written as numbered text sidecars next to the existing images in `未解析/`; a separate retry JSON keeps each image/conversation identity, previous and current errors, save result and request count. Subsequent runs may import that report to retry only its remaining failures. The image queue is never used by this path.
+- Added structured diagnostics for unsupported conversation content and missing base text. The observed 1.9.10 result has 100 unresolved images in 43 conversations: 90 `unsupported_content`, 8 `target_not_found`, 2 `missing_base`; all 100 queued image paths exist on disk. The old report does not contain enough schema detail to safely broaden the resolver yet.
+- Static syntax checks and validation against the actual prior report were done. Automated tests and live authenticated retry were not run under the standing verification instruction and current browser-control limitation.
+
 ## 1.9.10 — 2026-09-25
 
 - Prompt conversation reads remain serial, with a fixed ten-second completion-to-next-start gap.

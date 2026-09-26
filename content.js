@@ -23,7 +23,9 @@ let selectedAfterSequence = 0;
 const promptResolver = globalThis.ChatGPTPromptResolver;
 const promptGroups = globalThis.ChatGPTPromptGroups;
 const promptConversations = globalThis.ChatGPTPromptConversations;
+const promptRetry = globalThis.ChatGPTPromptRetry;
 let selectedSavePrompts = false;
+let selectedRetryPlan = null;
 const downloadProgress = globalThis.ChatGPTDownloadProgress;
 let selectedConcurrency = downloadQueue.DEFAULT_MODE;
 let floatingProgress = null;
@@ -116,10 +118,11 @@ function sendToWorker(message) {
   });
 }
 
-async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, unresolved, kind, conflictAction } = {}) {
+async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, unresolved, kind, conflictAction, retrySequence } = {}) {
   const response = await sendToWorker({ action: 'downloadFile', url, name, folder, fallbackName,
     ...(groupNumber !== undefined ? { groupNumber } : {}),
     ...(unresolved === true ? { unresolved: true } : {}),
+    ...(retrySequence !== undefined ? { retrySequence } : {}),
     ...(kind ? { kind } : {}), ...(conflictAction ? { conflictAction } : {}) });
   if (!response.ok) throw new Error('Download worker rejected the request');
   if (!Number.isInteger(response.downloadId) || response.downloadId < 0) throw new Error('Missing or invalid download ID');
@@ -147,6 +150,67 @@ function promptSource(record) {
     outputMessageId: record.outputMessageId, outputAssetId: record.outputAssetId,
     identityWarning: record.identityWarning, galleryMessageId: record.galleryMessageId,
     branchPath: record.branchPath, ruleVersion: record.ruleVersion, adapterVersion: record.adapterVersion };
+}
+
+async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status }) {
+  const startedAt = Date.now();
+  const client = originalImages.createClient();
+  const count = plan.entries.length;
+  status(`仅重试上次失败的 ${count} 张图片，涉及 ${plan.conversationCount} 个会话…`, 'prompts');
+  panel.update({ stage: 'prompts', totalImages: count, totalConversations: plan.conversationCount,
+    processedConversations: 0, resolvedImages: 0, promptErrors: count, etaMs: null });
+  const collected = await promptConversations.collect(plan.entries, {
+    client, resolver: promptResolver, checkActive: ensureSameView,
+    onProgress: update => {
+      const wait = update.retryInMs > 0 ? ` · 429 后等待 ${Math.ceil(update.retryInMs / 1000)} 秒` : '';
+      panel.update({ stage: 'prompts', totalImages: count, totalConversations: plan.conversationCount,
+        processedConversations: update.processedConversations, resolvedImages: update.resolvedImages,
+        promptErrors: update.errors.length, etaMs: null,
+        message: `定向重试会话 ${update.processedConversations}/${plan.conversationCount} · 已恢复 ${update.resolvedImages}/${count}${wait}` });
+    }
+  });
+  ensureSameView();
+  const results = { schemaVersion: 1, kind: 'prompt-retry-results', extensionVersion,
+    createdAt: new Date().toISOString(), sourceReportCreatedAt: plan.sourceReportCreatedAt,
+    sourceExtensionVersion: plan.sourceExtensionVersion, page: plan.page, scope: plan.scope,
+    folder, selectedImages: count, conversationCount: plan.conversationCount,
+    requestCount: collected.requestCount, rateLimitCount: collected.rateLimitCount,
+    requestGapMs: collected.requestGapMs, recovered: 0, unresolved: 0, saveFailed: 0,
+    imageDownloadsRequested: 0, collectionErrors: collected.errors, images: [] };
+  for (let i = 0; i < count; i++) {
+    ensureSameView();
+    const entry = plan.entries[i], record = collected.records[i];
+    const item = { sequence: entry.sequence, fileId: entry.fileId,
+      conversationId: entry.conversationId, imageRelativePath: `${folder}/未解析/${entry.imageName}`,
+      previousError: entry.previousError, promptStatus: record?.status || 'unresolved',
+      promptError: record?.status === 'resolved' ? null : record?.error || { code: 'missing_result', message: 'No prompt result returned' },
+      ...(record?.diagnostic ? { diagnostic: record.diagnostic } : {}) };
+    if (record?.status === 'resolved' && typeof record.cumulativePrompt === 'string' && record.cumulativePrompt.trim()) {
+      const name = promptRetry.promptFileName(entry.sequence);
+      item.promptRelativePath = `${folder}/未解析/${name}`;
+      item.promptSource = promptSource(record);
+      try {
+        item.promptDownloadId = await requestDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(record.cumulativePrompt),
+          name, folder, { kind: 'retry-prompt', unresolved: true, retrySequence: entry.sequence, conflictAction: 'overwrite' });
+        item.saveStatus = 'queued';
+        results.recovered++;
+      } catch (error) {
+        item.saveStatus = 'failed'; item.saveError = error.message; results.saveFailed++;
+      }
+    } else results.unresolved++;
+    results.images.push(item);
+    panel.update({ stage: 'prompt-save', totalImages: count, resolvedImages: results.recovered,
+      promptErrors: results.unresolved + results.saveFailed,
+      message: `提示词文件 ${i + 1}/${count} 已处理 · 已排队 ${results.recovered} · 仍未解析 ${results.unresolved} · 保存失败 ${results.saveFailed}` });
+  }
+  ensureSameView();
+  const reportName = `chatgpt-prompt-retry-results-${Date.now()}.json`;
+  await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)), reportName, folder);
+  panel.update({ stage: 'prompt-save', phase: results.unresolved || results.saveFailed ? 'completed with issues' : 'complete',
+    finished: true, totalImages: count, resolvedImages: results.recovered,
+    promptErrors: results.unresolved + results.saveFailed, etaMs: null,
+    elapsedMs: Date.now() - startedAt,
+    message: `定向重试完成：${results.recovered} 个提示词文件已排队，${results.unresolved} 张仍未解析，${results.saveFailed} 个保存失败。未请求任何原图；详见 ${reportName}。` });
 }
 
 function addBulkDownloadButton() {
@@ -232,6 +296,11 @@ function addBulkDownloadButton() {
       panel.update({ mode: concurrency === 'auto' ? 'auto' : 'manual' });
       repaintPanel = () => panel.update({ ...meter.snapshot(), elapsedMs: Date.now() - panelStarted, etaMs: null });
       panelTimer = setInterval(() => repaintPanel(), 500);
+      if (selectedRetryPlan) {
+        await retryFailedPrompts(selectedRetryPlan, { folder: DOWNLOAD_FOLDER, ensureSameView, panel, status });
+        btn.disabled = false;
+        return;
+      }
       status('Reading all image pages before assigning numbers.');
 
       let rateLimitEvents = 0;
@@ -664,6 +733,7 @@ function downloadDialogTheme() {
 
 async function chooseDownloadLocation() {
   selectedSavePrompts = false; // Per-dialog opt-in, never a stored preference.
+  selectedRetryPlan = null;
   return new Promise((resolve) => {
     let modal, themeObserver, systemTheme, syncTheme;
     const previousFocus = document.activeElement;
@@ -797,6 +867,11 @@ async function chooseDownloadLocation() {
               <button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false" aria-describedby="bulk-dl-prompts-hint">保存提示词 <span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
               <p id="bulk-dl-prompts-hint" class="hint">开启后串行读取会话，每次请求完成后等 10 秒；若收到 429，再额外等 10 秒（服务端要求更久时按其时间）。数百个会话可能需要一小时以上。相同提示词归入同一目录，无法解析的图片放入“未解析”。建议使用新目录。</p>
             </div>
+            <div class="prompt-option">
+              <label for="bulk-dl-retry-report">仅重试上次失败的提示词（可选）</label>
+              <input type="file" id="bulk-dl-retry-report" accept=".json,application/json" />
+              <p class="hint">选择旧目录中的 chatgpt-images-download-results.json，或上次的 prompt-retry-results JSON。只读取报告内仍未解析的会话，把新提示词写到该目录的“未解析”文件夹；不重新下载图片。上面的目录名须与旧目录完全一致。</p>
+            </div>
             <div class="parallel">
               <div><label for="bulk-dl-mode">Concurrency</label><p id="bulk-dl-parallel-hint" class="hint">Auto probes capacity and backs off when congested.</p></div>
               <select id="bulk-dl-mode" aria-describedby="bulk-dl-parallel-hint"><option value="auto">Auto</option><option value="manual">Manual</option></select>
@@ -836,6 +911,26 @@ async function chooseDownloadLocation() {
       const afterInput = root.querySelector('#bulk-dl-after');
       afterInput.value = '0'; // Always explicit; never load a saved checkpoint.
       const promptsButton = root.querySelector('#bulk-dl-prompts');
+      const retryInput = root.querySelector('#bulk-dl-retry-report');
+      retryInput.onchange = async () => {
+        const retryOnly = retryInput.files?.length > 0;
+        root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '仅重试提示词' : 'Start download';
+        afterInput.disabled = retryOnly;
+        promptsButton.disabled = retryOnly;
+        modeInput.disabled = retryOnly;
+        parallelInput.disabled = retryOnly;
+        errorText.textContent = '';
+        if (retryOnly) {
+          try {
+            const report = JSON.parse(await retryInput.files[0].text());
+            if (finished || !retryInput.files?.length) return;
+            const path = report.images?.find(item => item?.promptStatus === 'unresolved' || item?.saveStatus === 'failed');
+            const relativePath = report.kind === 'prompt-retry-results' ? path?.imageRelativePath : path?.relativePath;
+            const reportFolder = typeof relativePath === 'string' ? relativePath.split('/')[0] : '';
+            if (reportFolder && /^[^\\/\x00-\x1f]+$/.test(reportFolder)) input.value = reportFolder;
+          } catch (_) { errorText.textContent = '无法读取所选结果 JSON。'; }
+        }
+      };
       let savePrompts = false;
       promptsButton.setAttribute('aria-pressed', 'false');
       promptsButton.onclick = () => {
@@ -858,7 +953,7 @@ async function chooseDownloadLocation() {
       okBtn.disabled = true;
       sendToWorker({ action: 'getDownloadFolder' }).then(resp => {
         if (finished) return;
-        input.value = resp.folder || 'chatgpt-images';
+        if (!retryInput.files?.length) input.value = resp.folder || 'chatgpt-images';
         const saved = downloadQueue.normalizeConcurrency(resp.concurrency);
         modeInput.value = saved === 'auto' ? 'auto' : 'manual';
         parallelInput.value = String(saved === 'auto' ? downloadQueue.DEFAULT_CONCURRENCY : saved);
@@ -895,16 +990,32 @@ async function chooseDownloadLocation() {
         okBtn.disabled = true;
         errorText.textContent = '';
         try {
-          const after = imageNumbering.parseBoundary(afterInput.value);
+          const retryFile = retryInput.files?.[0];
+          let retryReport = null;
+          if (retryFile) {
+            if (retryFile.size > 32 * 1024 * 1024) throw new Error('结果报告超过 32 MB，无法安全读取。');
+            try { retryReport = JSON.parse(await retryFile.text()); }
+            catch (_) { throw new Error('所选文件不是有效 JSON。'); }
+          }
+          const after = retryReport ? 0 : imageNumbering.parseBoundary(afterInput.value);
           const concurrency = modeInput.value === 'auto' ? 'auto' : Number(parallelInput.value);
-          if (concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
+          if (!retryReport && concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
             throw new Error('Choose a whole number of parallel downloads from 1 to 12');
           }
+          // Validate the imported report and target directory before persisting
+          // settings or making any authenticated conversation requests.
+          const requestedFolder = input.value || 'chatgpt-images';
+          if (retryReport && originalImages.sanitizeSegment(requestedFolder, 'chatgpt-images') !== requestedFolder) {
+            throw new Error('目录名包含不支持的字符，请使用旧结果目录的原始名称。');
+          }
+          const retryPlan = retryReport ? promptRetry.plan(retryReport, requestedFolder, location.href) : null;
           const resp = await sendToWorker({ action: 'setDownloadFolder', folder: input.value || 'chatgpt-images', concurrency });
           if (resp.status !== 'saved' || !resp.folder) throw new Error('Folder could not be saved');
+          if (retryPlan && resp.folder !== retryPlan.folder) throw new Error('目录名包含不支持的字符，请使用旧结果目录的原始名称。');
           selectedConcurrency = downloadQueue.normalizeConcurrency(resp.concurrency ?? concurrency);
           selectedAfterSequence = after;
           selectedSavePrompts = savePrompts;
+          selectedRetryPlan = retryPlan;
           finish(resp.folder);
         } catch (error) {
           errorText.textContent = error.message;
