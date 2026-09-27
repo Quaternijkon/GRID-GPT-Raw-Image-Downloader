@@ -1149,61 +1149,63 @@ async function chooseDownloadLocation() {
       root.innerHTML = `
         <style>
           :host {
-            --dl-scheme:light; --dl-bg:#ffffff; --dl-text:#182923; --dl-muted:#596c62;
-            --dl-input:#f7faf8; --dl-border:#b6c5bc; --dl-separator:#e3ebe6;
-            --dl-secondary:#f0f5f2; --dl-hover:#e3eee8;
-            --dl-accent:#087a58; --dl-accent-hover:#066345; --dl-on-accent:#ffffff;
-            --dl-error:#a62e24; --dl-error-bg:#fff1ee; --dl-icon-bg:#e6f5ed;
+            --dl-scheme:light; --dl-bg:rgba(248,248,248,.94); --dl-text:#1d1d1f; --dl-muted:#6e6e73;
+            --dl-input:rgba(255,255,255,.82); --dl-border:rgba(60,60,67,.22); --dl-separator:rgba(60,60,67,.14);
+            --dl-secondary:rgba(118,118,128,.12); --dl-hover:rgba(118,118,128,.18);
+            --dl-accent:#087a58; --dl-accent-hover:#066a4c; --dl-on-accent:#ffffff;
+            --dl-error:#b42318; --dl-error-bg:#fff1ef; --dl-icon-bg:#e3f3eb;
+            --dl-group:rgba(118,118,128,.08);
             color-scheme:light;
           }
           :host([data-theme="dark"]) {
-            --dl-scheme:dark; --dl-bg:#202923; --dl-text:#eff6f1; --dl-muted:#b0c1b6;
-            --dl-input:#141d18; --dl-border:#61766a; --dl-separator:#3a4a40;
-            --dl-secondary:#2c3931; --dl-hover:#3a4b40;
-            --dl-accent:#70ddb0; --dl-accent-hover:#91e9c3; --dl-on-accent:#092f20;
-            --dl-error:#ffb5a8; --dl-error-bg:#442b29; --dl-icon-bg:#2a4536;
+            --dl-scheme:dark; --dl-bg:rgba(38,38,40,.94); --dl-text:#f5f5f7; --dl-muted:#a1a1a6;
+            --dl-input:rgba(28,28,30,.88); --dl-border:rgba(235,235,245,.22); --dl-separator:rgba(235,235,245,.13);
+            --dl-secondary:rgba(118,118,128,.24); --dl-hover:rgba(118,118,128,.32);
+            --dl-accent:#64d2a3; --dl-accent-hover:#7ce0b6; --dl-on-accent:#082d20;
+            --dl-error:#ffb4ab; --dl-error-bg:#442b29; --dl-icon-bg:#264638;
+            --dl-group:rgba(118,118,128,.16);
             color-scheme:dark;
           }
           *, *::before, *::after { box-sizing:border-box; }
           dialog {
             position:fixed; inset:0; margin:auto; padding:0;
-            width:min(620px, calc(100vw - 28px)); max-width:none;
-            max-height:calc(100vh - 32px); max-height:calc(100dvh - 32px);
+            width:min(560px, calc(100vw - 28px)); max-width:none;
+            max-height:calc(100vh - 24px); max-height:calc(100dvh - 24px);
             overflow:auto; overscroll-behavior:contain;
-            border:1px solid var(--dl-border); border-radius:20px;
+            border:1px solid var(--dl-border); border-radius:18px;
             background:var(--dl-bg); color:var(--dl-text); color-scheme:var(--dl-scheme);
-            box-shadow:0 24px 80px rgba(0,0,0,.32);
-            font:400 14px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+            backdrop-filter:blur(30px) saturate(1.35); -webkit-backdrop-filter:blur(30px) saturate(1.35);
+            box-shadow:0 28px 90px rgba(0,0,0,.34),0 1px 0 rgba(255,255,255,.28) inset;
+            font:400 13px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text",system-ui,sans-serif;
             text-align:left; letter-spacing:normal; direction:ltr;
           }
           dialog::backdrop { background:rgba(5,13,9,.65); }
-          .panel { padding:26px; }
-          .header { display:flex; gap:12px; align-items:center; margin-bottom:18px; }
-          .icon { display:grid; place-items:center; width:42px; height:42px; flex:none;
-            color:var(--dl-accent); background:var(--dl-icon-bg); border-radius:12px; }
-          svg { width:22px; height:22px; display:block; }
-          h2 { margin:0; color:var(--dl-text); font-size:20px; font-weight:650; line-height:1.3; }
-          .eyebrow { margin:0 0 3px; color:var(--dl-muted); font-size:11px; letter-spacing:.06em; }
+          .panel { padding:17px 20px 16px; }
+          .header { display:flex; gap:9px; align-items:center; margin-bottom:12px; }
+          .icon { display:grid; place-items:center; width:34px; height:34px; flex:none;
+            color:var(--dl-accent); background:var(--dl-icon-bg); border-radius:9px; }
+          svg { width:19px; height:19px; display:block; }
+          h2 { margin:0; color:var(--dl-text); font-size:18px; font-weight:680; line-height:1.2; letter-spacing:-.01em; }
           p { margin:0; }
           .description, .hint { color:var(--dl-muted); }
-          .description { margin-bottom:18px; }
+          .description { margin-bottom:12px; }
           .hint { margin-top:6px; font-size:12px; }
-          h3 { margin:0;color:var(--dl-text);font-size:14px;font-weight:700; }
-          .section { margin-top:14px;padding:16px;border:1px solid var(--dl-separator);border-radius:14px;background:var(--dl-input); }
+          h3 { margin:0;color:var(--dl-text);font-size:13px;font-weight:650; }
+          .section { margin-top:10px;padding:12px 13px;border:1px solid var(--dl-separator);border-radius:12px;background:var(--dl-group); }
           .section-head { display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px; }
           .section-head .hint { margin:2px 0 0; }
-          .field { margin-top:14px; }
+          .field { margin-top:10px; }
           .field:first-child { margin-top:0; }
-          .field-grid { display:grid;grid-template-columns:minmax(0,1fr) 150px;gap:14px;align-items:end; }
+          .field-grid { display:grid;grid-template-columns:minmax(0,1fr) 112px;gap:10px;align-items:end; }
           details > summary { cursor:pointer;color:var(--dl-text);font-weight:650;list-style:none; }
           details > summary::-webkit-details-marker { display:none; }
           details > summary::after { content:'＋';float:right;color:var(--dl-muted); }
           details[open] > summary::after { content:'−'; }
-          label { display:block; color:var(--dl-text); font-size:13px; font-weight:600; margin-bottom:7px; }
+          label { display:block; color:var(--dl-text); font-size:12px; font-weight:600; margin-bottom:5px; }
           input, button, select { font:inherit; letter-spacing:normal; }
           input, select {
-            display:block; width:100%; min-width:0; min-height:44px; padding:10px 12px;
-            border:1px solid var(--dl-border); border-radius:10px;
+            display:block; width:100%; min-width:0; min-height:36px; padding:7px 10px;
+            border:1px solid var(--dl-border); border-radius:8px;
             background:var(--dl-input); color:var(--dl-text);
             -webkit-text-fill-color:var(--dl-text); caret-color:var(--dl-accent);
             color-scheme:inherit;
@@ -1213,22 +1215,28 @@ async function chooseDownloadLocation() {
           input:focus-visible, button:focus-visible, select:focus-visible {
             outline:2px solid var(--dl-accent); outline-offset:3px;
           }
-          .parallel { display:flex; align-items:center; gap:18px; margin:14px 0 0; }
+          .parallel { display:flex; align-items:center; gap:14px; margin:10px 0 0; }
           .parallel > div { flex:1; }
           .parallel label { margin-bottom:0; }
           .parallel input { width:88px; flex:none; text-align:center; }
           .parallel select { width:150px; max-width:55%; flex:none; }
-          .prompt-option { margin-top:14px; }
+          .prompt-option { margin-top:10px; }
           .prompt-toggle { width:100%; justify-content:space-between; }
           .prompt-toggle[aria-pressed="true"] { background:var(--dl-icon-bg); border-color:var(--dl-accent); color:var(--dl-accent); }
-          .recovery-list { display:grid;gap:9px; }
+          #bulk-dl-prompts { min-height:32px;padding:0;border:0;background:transparent; }
+          #bulk-dl-prompts:hover:not(:disabled) { background:transparent; }
+          #bulk-dl-prompts-state { position:relative;width:38px;height:22px;border-radius:999px;background:#8e8e93;color:transparent;flex:none;transition:background .18s ease; }
+          #bulk-dl-prompts-state::after { content:'';position:absolute;width:18px;height:18px;left:2px;top:2px;border-radius:50%;background:#fff;box-shadow:0 1px 3px #0005;transition:transform .18s ease; }
+          #bulk-dl-prompts[aria-pressed="true"] #bulk-dl-prompts-state { background:var(--dl-accent); }
+          #bulk-dl-prompts[aria-pressed="true"] #bulk-dl-prompts-state::after { transform:translateX(16px); }
+          .recovery-list { display:grid;gap:7px; }
           .recovery-list .prompt-toggle { justify-content:flex-start;text-align:left; }
           .report-picker { margin-top:12px;padding-top:12px;border-top:1px solid var(--dl-separator); }
           .report-picker input { min-height:40px;padding:7px 9px; }
           [hidden] { display:none!important; }
           button {
             appearance:none; display:inline-flex; justify-content:center; align-items:center;
-            min-height:42px; padding:9px 15px; border:1px solid var(--dl-border); border-radius:10px;
+            min-height:36px; padding:7px 12px; border:1px solid var(--dl-border); border-radius:8px;
             background:var(--dl-secondary); color:var(--dl-text); -webkit-text-fill-color:currentColor;
             font-weight:600; cursor:pointer;
           }
@@ -1237,16 +1245,16 @@ async function chooseDownloadLocation() {
           .close { margin-left:auto; min-width:36px; min-height:36px; padding:6px;
             border-color:transparent; background:transparent; color:var(--dl-muted); }
           .close svg { width:18px; height:18px; }
-          .open-folder { width:100%; gap:8px; font-size:13px;margin-top:14px; }
+          .open-folder { width:100%; gap:7px; font-size:12px;margin-top:10px;background:transparent;border-color:transparent; }
           .open-folder svg { width:17px; height:17px; }
-          .actions { display:flex; justify-content:flex-end; gap:10px; margin-top:22px;
-            padding-top:18px; border-top:1px solid var(--dl-separator); }
-          .primary { min-width:155px; background:var(--dl-accent); color:var(--dl-on-accent); border-color:transparent; }
+          .actions { display:flex; justify-content:flex-end; gap:8px; margin-top:12px;
+            padding-top:12px; border-top:1px solid var(--dl-separator); }
+          .primary { min-width:120px; background:var(--dl-accent); color:var(--dl-on-accent); border-color:transparent; }
           .primary:hover:not(:disabled) { background:var(--dl-accent-hover); }
           .error { margin-top:14px; padding:10px 12px; border-radius:8px; background:var(--dl-error-bg);
             color:var(--dl-error); font-size:12px; overflow-wrap:anywhere; }
           .error:empty { display:none; }
-          .footnote { margin-top:12px; color:var(--dl-muted); font-size:11px; text-align:center; }
+          .footnote { display:none; }
           @media (max-width:520px) {
             .panel { padding:18px; }
             .actions > button { flex:1; min-width:0; }
@@ -1260,37 +1268,31 @@ async function chooseDownloadLocation() {
             input:focus-visible, button:focus-visible, select:focus-visible { outline-color:Highlight; }
           }
         </style>
-        <dialog aria-labelledby="bulk-dl-title" aria-describedby="bulk-dl-description">
+        <dialog aria-labelledby="bulk-dl-title">
           <div class="panel">
             <header class="header">
               <span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11m-4-4 4 4 4-4M4 15v5h16v-5"/></svg></span>
-              <div><p class="eyebrow">GRID · CHATGPT 原图导出</p><h2 id="bulk-dl-title">创建导出任务</h2></div>
+              <div><h2 id="bulk-dl-title">GRID</h2></div>
               <button type="button" class="close" id="bulk-dl-close" aria-label="关闭导出设置"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button>
             </header>
-            <p id="bulk-dl-description" class="description">导出当前图库或资料库目录中的原图。所有处理都在浏览器本地完成。</p>
             <section class="section">
-              <div class="section-head"><div><h3>新建导出</h3><p class="hint">设置输出目录、增量起点和提示词整理方式。</p></div></div>
-              <div class="field"><label for="bulk-dl-folder">下载子目录</label>
-                <input type="text" id="bulk-dl-folder" placeholder="chatgpt-images" autocomplete="off" spellcheck="false" aria-describedby="bulk-dl-folder-hint" />
-                <p id="bulk-dl-folder-hint" class="hint">位于浏览器默认“下载”目录中；不存在时自动创建。</p></div>
-              <div class="field field-grid"><div><label for="bulk-dl-after">从编号之后继续</label><p id="bulk-dl-after-hint" class="hint">0 表示全部下载；填写 1600 将从 001601 开始。</p></div>
-                <input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" aria-describedby="bulk-dl-after-hint bulk-dl-numbering-note" /></div>
-              <p id="bulk-dl-numbering-note" class="hint">最旧图片编号为 000001。首次使用当前编号规则时，请在新目录中填写 0。</p>
-              <div class="prompt-option"><button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false" aria-describedby="bulk-dl-prompts-hint"><span>同时恢复并整理提示词</span><span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
-                <p id="bulk-dl-prompts-hint" class="hint">会话按 10 秒间隔串行读取；遇到限流自动等待。图片按相同提示词归入稳定目录，暂时未解析项进入独立恢复区。</p></div>
+              <div class="field-grid"><div><label for="bulk-dl-folder">下载子目录</label>
+                <input type="text" id="bulk-dl-folder" placeholder="chatgpt-images" autocomplete="off" spellcheck="false" /></div>
+                <div><label for="bulk-dl-after">编号之后</label><input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" /></div></div>
+              <div class="prompt-option"><button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false"><span>同时恢复并整理提示词</span><span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
+              </div>
             </section>
             <section class="section">
-              <div class="section-head"><div><h3>恢复失败任务</h3><p class="hint">只处理失败项，不重复下载已经成功的图片。</p></div></div>
+              <h3>恢复失败任务</h3>
               <div class="recovery-list"><button type="button" class="prompt-toggle" id="bulk-dl-retry-images" hidden></button>
                 <button type="button" class="prompt-toggle" id="bulk-dl-retry-saved" hidden></button></div>
               <details class="report-picker"><summary>从结果报告恢复</summary>
-                <div class="field"><label for="bulk-dl-retry-report">选择 download-results 或 retry-results JSON</label><input type="file" id="bulk-dl-retry-report" />
-                  <p class="hint">插件会自动判断应重试原图还是提示词，并保持原有编号和目录布局。</p></div></details>
+                <div class="field"><input type="file" id="bulk-dl-retry-report" aria-label="选择结果报告" /></div></details>
             </section>
             <details class="section"><summary>性能设置（推荐保持自动）</summary>
-              <div class="parallel"><div><label for="bulk-dl-mode">图片下载并发</label><p id="bulk-dl-parallel-hint" class="hint">自动模式会探测速度，并在限流、超时或内存压力下主动降速。</p></div>
-                <select id="bulk-dl-mode" aria-describedby="bulk-dl-parallel-hint"><option value="auto">自动调节</option><option value="manual">手动设置</option></select></div>
-              <div class="parallel" id="bulk-dl-manual" hidden><div><label for="bulk-dl-concurrency">并发数量</label><p class="hint">可设置 1–12。</p></div>
+              <div class="parallel"><div><label for="bulk-dl-mode">图片下载并发</label></div>
+                <select id="bulk-dl-mode"><option value="auto">自动调节</option><option value="manual">手动设置</option></select></div>
+              <div class="parallel" id="bulk-dl-manual" hidden><div><label for="bulk-dl-concurrency">并发数量</label></div>
                 <input type="number" id="bulk-dl-concurrency" min="1" max="12" step="1" value="6" /></div>
             </details>
             <button type="button" class="open-folder" id="bulk-dl-show"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h7l2 3h9v11H3z"/></svg>打开浏览器下载目录</button>

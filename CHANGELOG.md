@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.20 — 2026-09-27
+
+- Restyled the settings window as a compact macOS system panel with translucent material, grouped surfaces, system typography, compact controls and a native-style toggle.
+- The title now shows only **GRID**. Removed the redundant page, new-export, folder, numbering, prompt and recovery explanatory paragraphs highlighted in review.
+- Placed output folder and incremental boundary on one row, retained recovery/report and performance disclosures, and reduced the default height so common laptop windows show the complete dialog without scrolling.
+
 ## 1.9.19 — 2026-09-27
 
 - Redesigned the settings dialog in Chinese with separate New Export, Failure Recovery and Performance sections. Automatically discovered image/prompt recovery actions are prominent; manual result import is placed in a disclosure section.
