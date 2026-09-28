@@ -86,6 +86,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const retryPrompt = msg.kind === 'retry-prompt';
       const retryImage = msg.kind === 'retry-image';
       const relocateImage = msg.kind === 'relocate-image';
+      const canonicalIndex = msg.kind === 'canonical-index';
       const validRetrySequence = Number.isSafeInteger(msg.retrySequence) && msg.retrySequence >= 1 && msg.retrySequence <= 999999;
       const replaceDownloadId = msg.replaceDownloadId;
       const validReplacement = replaceDownloadId === undefined || Number.isInteger(replaceDownloadId) && replaceDownloadId >= 0;
@@ -100,10 +101,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           (retryImage && (!/^data:image\//i.test(msg.url) || msg.conflictAction !== 'overwrite')) ||
           (relocateImage && (!/^data:image\//i.test(msg.url) || replaceDownloadId === undefined ||
             !validGroup || msg.conflictAction !== 'overwrite')) ||
+          (canonicalIndex && (msg.name !== 'grid-index.json' || !/^data:application\/json/i.test(msg.url) ||
+            hasGroup || unresolved || msg.conflictAction !== 'overwrite')) ||
           (!retryPrompt && msg.retrySequence !== undefined) ||
           (replaceDownloadId !== undefined && (prompt || retryPrompt || retryImage || unresolved || !validGroup)) ||
           (prompt ? (!validGroup || msg.name !== 'prompt.txt' || msg.conflictAction !== 'overwrite')
-            : (!retryPrompt && !retryImage && !relocateImage && msg.conflictAction !== undefined && msg.conflictAction !== 'uniquify')) ||
+            : (!retryPrompt && !retryImage && !relocateImage && !canonicalIndex && msg.conflictAction !== undefined && msg.conflictAction !== 'uniquify')) ||
           msg.overwrite !== undefined ||
           typeof msg.name !== 'string' || !msg.name || /[\\/]/.test(msg.name) ||
           msg.name === '.' || msg.name === '..' ||
@@ -123,14 +126,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const fail = message => {
           // Only repeat an explicitly rejected filename. Never retry an accepted
           // download or an uncertain timeout, which could create duplicate files.
-          if (!prompt && !retryPrompt && !filenameFallback && /invalid filename|filename.*invalid|文件名.*无效/i.test(message)) {
+          if (!prompt && !retryPrompt && !canonicalIndex && !filenameFallback && /invalid filename|filename.*invalid|文件名.*无效/i.test(message)) {
             attemptDownload(fallbackName, true);
           } else sendResponse({ ok: false, error: message });
         };
         try {
           const relativePath = `${directory}/${name}`;
           chrome.downloads.download({ url: msg.url, filename: relativePath,
-            conflictAction: prompt || retryPrompt || retryImage || relocateImage ? 'overwrite' : 'uniquify' }, downloadId => {
+            conflictAction: prompt || retryPrompt || retryImage || relocateImage || canonicalIndex ? 'overwrite' : 'uniquify' }, downloadId => {
             const error = chrome.runtime.lastError;
             if (Number.isInteger(downloadId) && downloadId >= 0) {
               if (replaceDownloadId === undefined && !retryImage) {
@@ -215,6 +218,49 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(error ? { status: 'error', error: error.message } :
           { status: checkpoint && validPromptRetryCheckpoint(checkpoint) ? 'found' : 'missing',
             checkpoint: checkpoint && validPromptRetryCheckpoint(checkpoint) ? checkpoint : null });
+      });
+      return true;
+    }
+
+    if (msg.action === 'getCanonicalIndex') {
+      const page = checkpointPage(msg.page);
+      const folder = typeof msg.folder === 'string' ? sanitizeSegment(msg.folder, 'chatgpt-images') : null;
+      if (!page || !folder || folder !== msg.folder) { sendResponse({ status: 'invalid', index: null }); return false; }
+      chrome.storage.local.get(['canonicalIndexes'], res => {
+        const error = chrome.runtime.lastError;
+        const index = res?.canonicalIndexes?.[`${page}\n${folder}`];
+        sendResponse(error ? { status: 'error', error: error.message } :
+          { status: index ? 'found' : 'missing', index: index || null });
+      });
+      return true;
+    }
+
+    if (msg.action === 'saveCanonicalIndex') {
+      const index = msg.index;
+      const page = checkpointPage(index?.page);
+      if (!index || index.kind !== 'grid-canonical-index' || index.layoutVersion !== 2 || !page ||
+          typeof index.folder !== 'string' || sanitizeSegment(index.folder, 'chatgpt-images') !== index.folder ||
+          !Array.isArray(index.images) || index.images.length > 5000 || JSON.stringify(index).length > 5 * 1024 * 1024) {
+        sendResponse({ status: 'invalid', error: 'Invalid canonical index' }); return false;
+      }
+      const ids = new Set(), sequences = new Set();
+      if (!index.images.every(item => Number.isSafeInteger(item?.sequence) && item.sequence >= 1 &&
+          /^file[_-][A-Za-z0-9_-]{8,100}$/.test(item.fileId) && !ids.has(item.fileId) && !sequences.has(item.sequence) &&
+          typeof item.relativePath === 'string' && (item.relativePath.startsWith(`${index.folder}/`) ||
+            item.relativePath.startsWith(`${index.folder}-recovery/`)) && ['available', 'failed'].includes(item.status) &&
+          (ids.add(item.fileId), sequences.add(item.sequence), true))) {
+        sendResponse({ status: 'invalid', error: 'Invalid canonical image entry' }); return false;
+      }
+      chrome.storage.local.get(['canonicalIndexes'], res => {
+        const readError = chrome.runtime.lastError;
+        if (readError) { sendResponse({ status: 'error', error: readError.message }); return; }
+        const values = res?.canonicalIndexes && typeof res.canonicalIndexes === 'object' ? { ...res.canonicalIndexes } : {};
+        values[`${page}\n${index.folder}`] = index;
+        const ordered = Object.entries(values).slice(-10);
+        chrome.storage.local.set({ canonicalIndexes: Object.fromEntries(ordered) }, () => {
+          const error = chrome.runtime.lastError;
+          sendResponse(error ? { status: 'error', error: error.message } : { status: 'saved', count: index.images.length });
+        });
       });
       return true;
     }

@@ -134,6 +134,22 @@ test('failed original checkpoints retain exact destination groups and clear reco
     processedFileIds: [checkpoint.images[0].fileId] })).count, 0);
 });
 
+test('canonical index is validated, stored by route and folder, and overwritten at a fixed path', async () => {
+  const calls = [];
+  const send = worker({ downloadHook: (opts, callback) => { calls.push(opts); callback(93); } });
+  const index = { kind: 'grid-canonical-index', layoutVersion: 2,
+    groupingRuleVersion: 'rule', page: 'https://chatgpt.com/images/', scope: 'generated-images', folder: 'images',
+    imageCount: 1, images: [{ sequence: 1, fileId: 'file_000000003f9071fdaeb1333ac2b5a412',
+      name: '000001-example.png', relativePath: 'images/p-0123456789abcdef0123456789abcdef-a/000001-example.png',
+      status: 'available', groupName: 'p-0123456789abcdef0123456789abcdef-a', promptStatus: 'resolved' }] };
+  assert.equal((await send({ action: 'saveCanonicalIndex', index })).count, 1);
+  assert.equal((await send({ action: 'getCanonicalIndex', page: index.page, folder: index.folder })).index.images.length, 1);
+  const downloaded = await send({ action: 'downloadFile', kind: 'canonical-index', conflictAction: 'overwrite',
+    folder: 'images', name: 'grid-index.json', url: 'data:application/json,%7B%7D' });
+  assert.equal(downloaded.relativePath, 'images/grid-index.json');
+  assert.equal(calls[0].conflictAction, 'overwrite');
+});
+
 // Prompt export regression definitions only; not executed during implementation.
 test('group paths are constructed from safe integers and images stay uniquify', async () => {
   const calls = [];

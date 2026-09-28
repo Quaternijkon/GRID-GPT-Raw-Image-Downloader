@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.9.21 — 2026-09-28
+
+- Added the overwrite-updated `grid-index.json` canonical manifest. Initial exports write the complete image state; prompt and original retries merge only their affected identities. Downstream tools can read one stable index regardless of whether success was immediate or recovered.
+- Canonical entries omit process-specific download IDs, retry rounds and timestamps. They retain stable sequence/file identity, final path, prompt group/status, byte size and digest, so equivalent final states have equivalent core index data.
+- Added explicit `layoutVersion: 2` and kept the formal output separate from the recovery staging area. A prompt recovery enters the canonical index only after final download completion and obsolete staged-file cleanup.
+- Added `scripts/reconcile-legacy-export.js` for legacy local exports. The user's 1.9.10 export was rebuilt non-destructively into 686 canonical groups with 1557 hard-linked images, 90 recovered prompts and a canonical index; the source folder was not modified.
+
 ## 1.9.20 — 2026-09-27
 
 - Restyled the settings window as a compact macOS system panel with translucent material, grouped surfaces, system typography, compact controls and a native-style toggle.

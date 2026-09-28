@@ -284,6 +284,55 @@ async function persistImageRetryCheckpoint(results, folder) {
   }
 }
 
+function canonicalImage(item, folder) {
+  const groupName = item.groupName || null;
+  const fallbackName = originalImages.filename(item.originalName || item.name || item.fileId,
+    item.mimeType || 'image/png', item.sequence - 1, imageNumbering.WIDTH);
+  const destinationRoot = groupName === '未解析' ? `${folder}-recovery` : folder;
+  const relativePath = item.imageRelativePath || item.relativePath ||
+    `${destinationRoot}/${groupName ? groupName + '/' : ''}${fallbackName}`;
+  return { sequence: item.sequence, fileId: item.fileId,
+    name: item.imageName || item.name || fallbackName, relativePath,
+    status: ['queued', 'reconciled-local'].includes(item.status) || item.saveStatus === 'queued' ? 'available' : 'failed',
+    groupName, promptStatus: item.promptStatus || 'disabled',
+    promptError: item.promptStatus === 'unresolved' ? item.promptError || null : null,
+    ...(Number.isFinite(item.bytes) ? { bytes: item.bytes } : {}),
+    ...(typeof item.mimeType === 'string' ? { mimeType: item.mimeType } : {}),
+    ...(typeof item.sha256 === 'string' ? { sha256: item.sha256 } : {}) };
+}
+
+async function writeCanonicalIndex(index) {
+  const stored = await sendToWorker({ action: 'saveCanonicalIndex', index });
+  if (stored.status !== 'saved') throw new Error(stored.error || '规范索引无法保存');
+  await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(index, null, 2)),
+    'grid-index.json', index.folder, { kind: 'canonical-index', conflictAction: 'overwrite' });
+  return { saved: true, count: index.images.length };
+}
+
+async function createCanonicalIndex(results, folder) {
+  const index = { kind: 'grid-canonical-index', layoutVersion: 2,
+    groupingRuleVersion: promptGroups.RULE_VERSION, page: results.page, scope: results.scope,
+    folder, imageCount: (results.images || []).length,
+    images: (results.images || []).map(item => canonicalImage(item, folder)).sort((a, b) => a.sequence - b.sequence) };
+  return { index, result: await writeCanonicalIndex(index) };
+}
+
+async function mergeCanonicalIndex(page, folder, updates) {
+  const response = await sendToWorker({ action: 'getCanonicalIndex', page, folder });
+  if (response.status !== 'found' || !response.index) return { saved: false, reason: 'missing-base-index' };
+  const byId = new Map(response.index.images.map(item => [item.fileId, item]));
+  for (const item of updates) byId.set(item.fileId, canonicalImage(item, folder));
+  const index = { ...response.index, groupingRuleVersion: promptGroups.RULE_VERSION,
+    imageCount: byId.size, images: [...byId.values()].sort((a, b) => a.sequence - b.sequence) };
+  return { index, result: await writeCanonicalIndex(index) };
+}
+
+async function upsertCanonicalIndex(results, folder) {
+  return (results.afterSequence || 0) > 0
+    ? mergeCanonicalIndex(results.page, folder, results.images || [])
+    : createCanonicalIndex(results, folder);
+}
+
 function planImageRetry(checkpoint, page) {
   if (!checkpoint || checkpoint.kind !== 'image-retry-checkpoint' || checkpoint.schemaVersion !== 1 ||
       !Array.isArray(checkpoint.images) || !checkpoint.images.length) throw new Error('没有可重试的原图失败项。');
@@ -421,6 +470,8 @@ async function retryFailedImages(plan, { folder, ensureSameView, panel, status }
       message: `原图重试 ${index + 1}/${plan.entries.length} · ${results.queued} 成功 · ${results.failed} 仍失败` });
   }
   results.imageRetryCheckpoint = await persistImageRetryCheckpoint(results, folder);
+  try { const merged = await mergeCanonicalIndex(plan.page, folder, results.images); results.canonicalIndex = merged.result || merged; }
+  catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
   const reportName = `chatgpt-image-retry-results-${Date.now()}.json`;
   await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)),
     reportName, folder);
@@ -504,6 +555,11 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
         item.retrievalAttempts = asset.retrievalAttempts;
         item.retrievalErrors = asset.retrievalErrors;
         item.recoveryRounds = asset.recoveryRounds;
+        item.bytes = asset.blob.size;
+        item.mimeType = asset.blob.type;
+        item.width = asset.width;
+        item.height = asset.height;
+        item.sha256 = await originalImages.fingerprint(asset.blob);
         item.saveStatus = 'queued';
         item.exactPlacement = true;
         results.recovered++;
@@ -524,6 +580,8 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
   ensureSameView();
   const reportName = `chatgpt-prompt-retry-results-${Date.now()}.json`;
   results.retryCheckpoint = await persistPromptRetryCheckpoint(results, folder);
+  try { const merged = await mergeCanonicalIndex(plan.page, folder, results.images); results.canonicalIndex = merged.result || merged; }
+  catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
   await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)), reportName, folder);
   panel.update({ stage: 'prompt-save', phase: results.unresolved || results.saveFailed ? 'completed with issues' : 'complete',
     finished: true, totalImages: count, resolvedImages: results.recovered,
@@ -1075,6 +1133,10 @@ function addBulkDownloadButton() {
       }
       if (results.images.length) {
         results.imageRetryCheckpoint = await persistImageRetryCheckpoint(results, DOWNLOAD_FOLDER);
+      }
+      if (results.images.length) {
+        try { const indexed = await upsertCanonicalIndex(results, DOWNLOAD_FOLDER); results.canonicalIndex = indexed.result || indexed; }
+        catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
       }
       await exportJson(results, reportName);
       btn.textContent = files.length
