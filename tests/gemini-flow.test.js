@@ -14,6 +14,8 @@ test('Gemini flow resumes by verified identity and writes grouped image, prompt,
   const progress = [{ kind: 'media', mediaId: first.id, sequence: 1, status: 'complete',
     relativePath: `gemini-images/${firstGroup}/000001-${first.id}.png` }];
   const chrome = { runtime: { getManifest: () => ({ version: '3.0.0' }), sendMessage(message, callback) {
+    if (message.action === 'getMediaRetryCheckpoint') return callback({ status: 'missing', checkpoint: null });
+    if (message.action === 'saveMediaRetryCheckpoint') return callback({ status: 'saved' });
     if (message.action === 'getGeminiProgress') return callback({ status: 'found', records: progress });
     if (message.action === 'getGeminiDownloadState') return callback({ status: 'complete', exists: true });
     if (message.action === 'geminiDownload') {
@@ -73,6 +75,8 @@ test('Gemini relocation converges on the one-shot folder layout after an interru
   const mediaCalls = [], cleanupCalls = [];
   let failCleanup = true, missingPrompt = false, nextId = 90;
   const chrome = { runtime: { getManifest: () => ({ version: '3.0.3' }), sendMessage(message, callback) {
+    if (message.action === 'getMediaRetryCheckpoint') return callback({ status: 'missing', checkpoint: null });
+    if (message.action === 'saveMediaRetryCheckpoint') return callback({ status: 'saved' });
     if (message.action === 'getGeminiProgress') return callback({ status: 'found', records: records.map(x => ({ ...x })) });
     if (message.action === 'getGeminiDownloadState') return callback({ status: 'complete', exists: true });
     if (message.action === 'geminiDownload') {

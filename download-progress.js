@@ -39,8 +39,10 @@
     };
   }
 
-  function createPanel({ theme = () => 'dark', onClose = () => {} } = {}) {
+  function createPanel({ theme = () => 'dark', onClose = () => {}, provider = 'ChatGPT',
+    mediaLabel = '图片', promptModeLabel = '串行读取 · 10 秒间隔', id } = {}) {
     const host = document.createElement('div');
+    if (id) host.id = id;
     host.style.cssText = 'all:initial;position:fixed;right:20px;bottom:20px;z-index:2147483646;';
     const root = host.attachShadow({ mode: 'open' });
     root.innerHTML = `
@@ -92,13 +94,13 @@
         @media(prefers-reduced-motion:reduce) { .bar { transition:none; } }
       </style>
       <section class="card" role="region" aria-label="导出任务进度">
-        <header><div class="mark" aria-hidden="true">↓</div><div><div class="eyebrow">GRID · CHATGPT 导出</div><h2 id="title">准备导出</h2></div>
+        <header><div class="mark" aria-hidden="true">↓</div><div><div class="eyebrow">GRID · ${provider.toUpperCase()} 导出</div><h2 id="title">准备导出</h2></div>
           <div class="controls"><button id="collapse" aria-label="收起进度" aria-expanded="true">−</button><button id="close" aria-label="关闭进度" disabled>×</button></div></header>
         <div class="compact" id="compact"></div>
         <div class="body">
           <div class="phase"><span class="badge" id="phase">准备中</span><span class="mode" id="mode">自动调节</span></div>
           <div class="numbers"><div><strong id="count">0</strong><span id="total"> / — 已处理</span></div><span class="percent" id="percent">—</span></div>
-          <div class="track" id="track" role="progressbar" aria-label="图片任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar" id="bar"></div></div>
+          <div class="track" id="track" role="progressbar" aria-label="${mediaLabel}任务进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div class="bar" id="bar"></div></div>
           <svg id="chart" class="chart" viewBox="0 0 340 34" preserveAspectRatio="none" aria-hidden="true"><path d="M0 33H340" stroke="var(--line)"/><polyline id="spark" fill="none" stroke="var(--accent)" stroke-width="1.8" points="0,33 340,33"/></svg>
           <div class="stats" id="transfer-stats">
             <div class="stat"><span class="label">实时速度</span><span class="value" id="speed">—</span><span class="sub" id="average">正在读取图片列表</span></div>
@@ -110,7 +112,7 @@
             <div class="stat"><span class="label">已读取会话</span><span class="value" id="conversations">0 / —</span></div>
             <div class="stat"><span class="label">已恢复提示词</span><span class="value" id="resolved">0 / —</span></div>
             <div class="stat"><span class="label">全部 / 本次分组</span><span class="value" id="groups">— / —</span></div>
-            <div class="stat"><span class="label">本次图片</span><span class="value" id="selected-images">—</span></div>
+            <div class="stat"><span class="label">本次${mediaLabel}</span><span class="value" id="selected-images">—</span></div>
           </div>
           <div class="status" id="prompt-errors" hidden><span id="prompt-error-count"></span><span id="prompt-save-error-count"></span></div>
           <div class="status"><span id="queued">0 已排队</span><span id="failed">0 原图失败</span><span id="retrying">0 正在恢复</span><span id="warnings">0 条警告</span></div>
@@ -145,20 +147,20 @@
       const displayTotal = promptStage ? state.totalImages : total;
       const percent = displayTotal > 0 ? Math.min(100, displayCompleted / displayTotal * 100) : state.finished && phase === 'complete' ? 100 : 0;
       const promptPhase = { prompts: '恢复提示词', grouping: '构建分组', 'prompt-save': '保存提示词' }[state.stage];
-      const phaseLabels = { preparing: '准备中', collecting: '读取列表', transferring: '下载原图', cooldown: '等待恢复',
+      const phaseLabels = { preparing: '准备中', collecting: '读取列表', transferring: mediaLabel === '图片' ? '下载原图' : `下载${mediaLabel}`, cooldown: '等待恢复',
         backoff: '降低速度', recovering: '恢复中', finalizing: '整理结果', complete: '已完成',
         'completed with issues': '完成但有问题', blocked: '已阻止', error: '发生错误', prompts: '恢复提示词' };
       const phaseLabel = promptStage && !state.finished ? promptPhase : phaseLabels[phase] || String(phase);
       el('phase').textContent = phaseLabel;
       el('title').textContent = state.finished ? (phase === 'complete' ? '导出完成' : phase === 'completed with issues' ? '导出完成，但需要处理' : '导出已停止')
-        : promptStage ? promptPhase : state.stage === 'images' ? '正在下载原图' : '正在准备导出';
+        : promptStage ? promptPhase : state.stage === 'images' ? (mediaLabel === '图片' ? '正在下载原图' : `正在下载${mediaLabel}`) : '正在准备导出';
       el('phase').className = ['blocked', 'error', 'completed with issues', 'cooldown'].includes(phase) ? 'badge warning' : 'badge';
-      el('mode').textContent = promptStage ? '串行读取 · 10 秒间隔' : state.mode === 'manual' ? '手动并发' : '自动调节并发';
+      el('mode').textContent = promptStage ? promptModeLabel : state.mode === 'manual' ? '手动并发' : '自动调节并发';
       el('count').textContent = displayCompleted.toLocaleString();
       el('total').textContent = ` / ${displayTotal == null ? '—' : displayTotal.toLocaleString()} ${promptStage ? '条提示词' : '项已处理'}`;
       el('percent').textContent = displayTotal == null ? '—' : `${percent.toFixed(1)}%`;
       el('bar').style.width = `${percent}%`; el('track').setAttribute('aria-valuenow', String(percent));
-      el('track').setAttribute('aria-label', promptStage ? '提示词恢复进度' : '图片任务进度');
+      el('track').setAttribute('aria-label', promptStage ? '提示词恢复进度' : `${mediaLabel}任务进度`);
       // SVG does not implement HTMLElement.hidden in every supported browser.
       if (promptStage) el('chart').setAttribute('hidden', '');
       else el('chart').removeAttribute('hidden');
@@ -190,7 +192,7 @@
       el('control').textContent = reasonLabels[reasonKey] || rawReason || '等待开始';
       el('elapsed').textContent = duration(state.elapsedMs || 0);
       el('eta').textContent = state.etaMs == null ? '—' : `≈ ${duration(state.etaMs)}`;
-      const statusLabels = { queued: '已排队', failed: '原图失败', retrying: '正在恢复', warnings: '条警告' };
+      const statusLabels = { queued: '已排队', failed: mediaLabel === '图片' ? '原图失败' : `${mediaLabel}失败`, retrying: '正在恢复', warnings: '条警告' };
       for (const key of ['queued', 'failed', 'retrying', 'warnings']) {
         el(key).textContent = `${state[key] || 0} ${statusLabels[key]}`;
         el(key).className = key === 'failed' && state[key] ? 'danger' :
@@ -200,7 +202,7 @@
         /backoff|Transient request errors|暂时性请求错误/i.test(rawReason);
       el('recovery').hidden = !recovering;
       el('recovery').textContent = (state.retrying || 0) > 0
-        ? `${state.retrying} 个原图任务正在等待或恢复。暂时错误不会立即计入失败。`
+        ? `${state.retrying} 个${mediaLabel}任务正在等待或恢复。暂时错误不会立即计入失败。`
         : '请求速度已自动降低，网络恢复后会继续。';
       if (patch.message !== undefined) el('message').textContent = patch.message;
       el('close').disabled = !state.finished;

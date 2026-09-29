@@ -36,6 +36,28 @@ function worker({ storageError = false, downloadId = 1, downloadHook, fetchImpl,
     new Promise(resolve => listener(message, { url: senderUrl }, resolve));
 }
 
+test('Grok and Gemini keep separate, validated one-click recovery checkpoints', async () => {
+  const send = worker();
+  const grokPage = 'https://grok.com/imagine';
+  const geminiPage = 'https://gemini.google.com/library';
+  const grok = { schemaVersion: 1, scope: 'owned', folder: 'grok-media',
+    failed: ['asset_000000001'], unresolved: ['asset_000000002'] };
+  const gemini = { schemaVersion: 1, scope: 'library', folder: 'gemini-images',
+    failed: [`rc_${'a'.repeat(16)}`], unresolved: [] };
+  assert.equal((await send({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: grok }, grokPage)).status, 'saved');
+  assert.equal((await send({ action: 'saveMediaRetryCheckpoint', provider: 'Gemini', checkpoint: gemini }, geminiPage)).status, 'saved');
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }, grokPage)).checkpoint.failed[0], grok.failed[0]);
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Gemini' }, geminiPage)).checkpoint.failed[0], gemini.failed[0]);
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }, 'https://grok.com/imagine/saved')).checkpoint, null);
+  assert.equal((await send({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: {
+    ...grok, folder: '../outside' } }, grokPage)).status, 'error');
+  assert.equal((await send({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: {
+    ...grok, failed: ['../outside'] } }, grokPage)).status, 'error');
+  assert.equal((await send({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: {
+    ...grok, failed: [], unresolved: [] } }, grokPage)).status, 'saved');
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }, grokPage)).checkpoint, null);
+});
+
 test('Gemini worker validates a full size image redirect, exact bytes, and tracked destination', async () => {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
   const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;

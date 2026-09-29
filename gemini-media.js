@@ -164,6 +164,11 @@
       targets.get(entry.chatId).get(entry.responseId).push(entry);
     }
     const assistantPrompts = new Map(), requestPrompts = new Map(), failedChats = new Map();
+    const matchedCount = () => entries.filter(entry => {
+      const resourceId = entry.resourceId || entry.id?.slice(0, 19);
+      return assistantPrompts.has(`${entry.chatId}:${entry.responseId}`) ||
+        requestPrompts.has(`${entry.chatId}:${entry.responseId}:${resourceId}`);
+    }).length;
     const wait = delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
     const readChats = async (chatIds, round) => {
       for (let index = 0; index < chatIds.length; index++) {
@@ -175,7 +180,7 @@
           for (let page = 1; page <= 20; page++) {
             const data = await rpc(fetchImpl, 'hNvQHb', [chatId, 100, cursor, 1, [1], [4], null, 1],
               { token, checkActive, delay, onRetry: retry => onProgress({ phase: 'request-retry', round,
-                processed: index, total: chatIds.length, retry }) });
+                processed: index, total: chatIds.length, resolved: matchedCount(), retry }) });
             if (!Array.isArray(data?.[0]) || data[1] != null && typeof data[1] !== 'string')
               throw new Error('Gemini 会话消息格式变化');
             for (const turn of data[0]) {
@@ -202,7 +207,7 @@
           failedChats.delete(chatId);
         } catch (error) { failedChats.set(chatId, error.message); }
         onProgress({ phase: round ? 'recovery' : 'collecting', round,
-          processed: index + 1, total: chatIds.length });
+          processed: index + 1, total: chatIds.length, resolved: matchedCount() });
       }
     };
     const assign = () => {
@@ -231,7 +236,7 @@
       const pendingChats = [...new Set(entries.filter(entry => !entry.prompt).map(entry => entry.chatId))];
       const waitMs = round === 1 ? 2000 : 5000;
       onProgress({ phase: 'recovery-wait', round, processed: 0, total: pendingChats.length,
-        unresolved, waitMs });
+        resolved: entries.length - unresolved, unresolved, waitMs });
       await wait(waitMs);
       await readChats(pendingChats, round);
       unresolved = assign();

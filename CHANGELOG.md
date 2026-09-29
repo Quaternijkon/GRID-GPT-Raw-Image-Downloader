@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.4 — 2026-09-29
+
+- Align Grok and Gemini export settings and progress with the full ChatGPT dashboard, including prompt-stage counts, response-byte speed, ETA, concurrency telemetry, queue and error counts, and collapsible display.
+- Add provider-scoped local retry checkpoints for failed media and unresolved prompts, surfaced as one-click recovery actions. Existing Chrome completion and destination checks still govern resume and grouped placement.
+
+
 ## 3.0.3 — 2026-09-29
 
 - Resolve Gemini image prompts by checking the exact media identity within the corresponding conversation turn, including request-linked image records as well as assistant response IDs. Assistant response matches take precedence where the same ID also appears as a later request parent. Reread only still-unresolved conversations in two bounded recovery rounds before choosing output paths.

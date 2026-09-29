@@ -36,6 +36,20 @@ const geminiSender = url => {
 };
 const GEMINI_ID = /^rc_[a-f0-9]{16}(?:-[a-f0-9]{32})?$/;
 const geminiPrefix = (folder, prompts) => `geminiDownloadProgress:${folder}\n${prompts ? 'prompts' : 'images'}\n`;
+const mediaRetryStore = 'gridMediaRetryCheckpoints';
+function mediaRetryContext(provider, grokScope, geminiPage) {
+  if (provider === 'Grok' && grokScope) return { scope: grokScope, id: GROK_ID, fallback: 'grok-media' };
+  if (provider === 'Gemini' && geminiPage) return { scope: 'library', id: GEMINI_ID, fallback: 'gemini-images' };
+  return null;
+}
+function validMediaRetry(value, context) {
+  if (!value || !context || value.schemaVersion !== 1 || value.scope !== context.scope ||
+      typeof value.folder !== 'string' || sanitizeSegment(value.folder, context.fallback) !== value.folder ||
+      !Array.isArray(value.failed) || !Array.isArray(value.unresolved) ||
+      value.failed.length > 5000 || value.unresolved.length > 5000) return false;
+  return [value.failed, value.unresolved].every(ids =>
+    ids.every(id => typeof id === 'string' && context.id.test(id)) && new Set(ids).size === ids.length);
+}
 const geminiRecoveryPath = (path, folder, sequence, id) => {
   const prefix = `${folder}/未解析/${String(sequence).padStart(6, '0')}-${id}.`;
   return typeof path === 'string' && path.startsWith(prefix) &&
@@ -255,6 +269,33 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   try {
+    if (msg.action === 'getMediaRetryCheckpoint' || msg.action === 'saveMediaRetryCheckpoint') {
+      const context = mediaRetryContext(msg.provider, grokScope, geminiPage);
+      if (!context) { sendResponse({ status: 'invalid', error: 'Invalid media retry provider' }); return false; }
+      void (async () => {
+        const values = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb), [mediaRetryStore]);
+        const checkpoints = values?.[mediaRetryStore] && typeof values[mediaRetryStore] === 'object'
+          ? { ...values[mediaRetryStore] } : {};
+        const key = `${msg.provider}:${context.scope}\n${msg.folder || ''}`;
+        if (msg.action === 'getMediaRetryCheckpoint') {
+          const found = typeof msg.folder === 'string' ? checkpoints[key] :
+            Object.entries(checkpoints).filter(([name, value]) => name.startsWith(`${msg.provider}:${context.scope}\n`) &&
+              validMediaRetry(value, context) && (value.failed.length || value.unresolved.length))
+              .sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0))[0]?.[1];
+          return { status: validMediaRetry(found, context) ? 'found' : 'missing',
+            checkpoint: validMediaRetry(found, context) ? found : null };
+        }
+        const checkpoint = msg.checkpoint;
+        if (!validMediaRetry(checkpoint, context)) throw new Error('Invalid media retry checkpoint');
+        checkpoints[`${msg.provider}:${context.scope}\n${checkpoint.folder}`] =
+          { ...checkpoint, savedAt: Date.now() };
+        const ordered = Object.entries(checkpoints).sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0)).slice(0, 20);
+        await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
+          { [mediaRetryStore]: Object.fromEntries(ordered) });
+        return { status: 'saved', failed: checkpoint.failed.length, unresolved: checkpoint.unresolved.length };
+      })().then(sendResponse, error => sendResponse({ status: 'error', error: error.message }));
+      return true;
+    }
     if (geminiPage) {
       (async () => {
         const folder = msg.folder;

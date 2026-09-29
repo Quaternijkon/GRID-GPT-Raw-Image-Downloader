@@ -41,6 +41,8 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
     getManifest: () => ({ version: '2.0.2' }),
     sendMessage(message, callback) {
       if (message.action === 'getGrokProgress') { callback({ status: 'found', records: storedProgress }); return; }
+      if (message.action === 'getMediaRetryCheckpoint') { callback({ status: 'missing', checkpoint: null }); return; }
+      if (message.action === 'saveMediaRetryCheckpoint') { callback({ status: 'saved' }); return; }
       if (message.action === 'getGrokDownloadState') { callback({ status: 'complete', exists: true }); return; }
       if (message.action === 'grokDownload') {
         downloads.push(message);

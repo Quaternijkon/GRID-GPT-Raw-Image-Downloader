@@ -30,12 +30,21 @@
   }
 
   const makeDialog = scope => globalThis.GRIDMediaExportUI.dialog('Grok', scope);
-  const makeProgressPanel = onClose => globalThis.GRIDMediaExportUI.progress('Grok', onClose);
+  const makeProgressPanel = (onClose, options) => globalThis.GRIDMediaExportUI.progress('Grok', onClose,
+    { concurrency: options.concurrency });
 
   async function settings(scope) {
     const ui = makeDialog(scope);
     const { el } = ui;
-    let closed = false, request = 0, retryIds = null;
+    let closed = false, request = 0, retryIds = null, recoveryFolder = null;
+    const activateRetry = (ids, prompts) => {
+      retryIds = [...ids];
+      recoveryFolder = el('folder').value;
+      el('prompts').checked = prompts;
+      el('retry-hint').textContent = `将恢复 ${retryIds.length} 个媒体任务。`;
+      el('start').textContent = '开始恢复';
+      void refresh();
+    };
     const refresh = async () => {
       if (el('mode').value !== 'auto') { el('progress').textContent = ''; return; }
       const current = ++request;
@@ -48,33 +57,39 @@
           record.status === 'complete').map(record => record.sequence));
         let through = 0;
         while (completed.has(through + 1)) through++;
-        el('progress').textContent = `本地记录已完成至编号 ${through}；开始时将与 Grok 列表核对。`;
+        el('progress').textContent = through
+          ? `本地记录已完成至编号 ${through}；开始时将与 Grok 列表核对。`
+          : '尚无已完成记录；将从编号 1 开始。';
       } catch (_) { if (!closed && current === request) el('progress').textContent = '本地进度暂不可读取'; }
     };
-    el('mode').onchange = () => { el('after-row').hidden = el('mode').value !== 'manual'; void refresh(); };
+    el('mode').onchange = () => { el('after-row').hidden = el('mode').value !== 'manual';
+      el('after').disabled = el('after-row').hidden; void refresh(); };
+    el('mode').onchange();
     el('concurrency-mode').onchange = () => {
       el('concurrency-row').hidden = el('concurrency-mode').value === 'auto';
     };
     el('folder').onchange = () => { void refresh(); };
     el('prompts').onchange = () => { void refresh(); };
-    el('show-folder').onclick = () => { void worker({ action: 'showDownloadFolder' }); };
+    el('show-folder').onclick = () => { void worker({ action: 'showDownloadFolder' })
+      .catch(error => { el('error').textContent = error.message; }); };
     el('retry-report').onchange = async () => {
       retryIds = null;
       el('retry-hint').textContent = '';
       const file = el('retry-report').files?.[0];
       if (!file) return;
       try {
+        if (file.size > 32 * 1024 * 1024) throw new Error('结果报告超过 32 MB，无法安全读取。');
         const report = JSON.parse(await file.text());
         if (report.kind !== 'grok-download-results' || report.scope !== scope ||
+            new URL(report.page).origin !== location.origin ||
             !Array.isArray(report.media)) throw new Error('这不是当前 Grok 页面对应的结果报告。');
         const ids = report.media.filter(item => item.status === 'failed' || item.promptStatus === 'unresolved')
           .map(item => item.mediaId).filter(id => /^[A-Za-z0-9_-]{8,128}$/.test(id));
         if (!ids.length) throw new Error('结果报告中没有可恢复的媒体任务。');
-        retryIds = [...new Set(ids)];
-        if (typeof report.folder === 'string' && originals.sanitizeSegment(report.folder, 'grok-media') === report.folder)
-          el('folder').value = report.folder;
-        el('retry-hint').textContent = `将恢复报告中的 ${retryIds.length} 个失败或未解析任务。`;
-        el('start').textContent = '开始恢复';
+        if (typeof report.folder !== 'string' || originals.sanitizeSegment(report.folder, 'grok-media') !== report.folder)
+          throw new Error('结果报告中的下载目录无效。');
+        el('folder').value = report.folder;
+        activateRetry(new Set(ids), report.savePrompts === true);
       } catch (error) { el('error').textContent = error.message; el('retry-report').value = ''; }
     };
     try {
@@ -86,6 +101,26 @@
       el('concurrency-mode').onchange();
       el('start').disabled = false;
       void refresh();
+      void worker({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }).then(response => {
+        if (closed || response.status !== 'found') return;
+        const checkpoint = response.checkpoint;
+        const failed = checkpoint.failed || [], unresolved = checkpoint.unresolved || [];
+        if (!failed.length && !unresolved.length) return;
+        el('retry-images').hidden = !failed.length;
+        el('retry-images').textContent = `↻ 一键重试上次失败的 ${failed.length} 个媒体`;
+        el('retry-prompts').hidden = !unresolved.length;
+        el('retry-prompts').textContent = `↻ 一键重试上次未解析的 ${unresolved.length} 个提示词`;
+        el('retry-images').onclick = () => {
+          el('folder').value = checkpoint.folder;
+          el('retry-report').value = '';
+          activateRetry(new Set(failed), unresolved.length > 0);
+        };
+        el('retry-prompts').onclick = () => {
+          el('folder').value = checkpoint.folder;
+          el('retry-report').value = '';
+          activateRetry(new Set(unresolved), true);
+        };
+      }).catch(() => {});
     } catch (error) { el('error').textContent = error.message; }
     return new Promise(resolve => {
       const finish = value => { if (closed) return; closed = true; ui.close(); resolve(value); };
@@ -98,6 +133,7 @@
           if (!el('images').checked && !el('videos').checked) throw new Error('请选择图片或视频。');
           const folder = el('folder').value.trim();
           if (originals.sanitizeSegment(folder, 'grok-media') !== folder) throw new Error('下载目录名包含不支持的字符。');
+          if (retryIds && folder !== recoveryFolder) throw new Error('恢复任务必须使用原结果目录。');
           const after = !retryIds && el('mode').value === 'manual' ? Number(el('after').value) : 0;
           if (!Number.isSafeInteger(after) || after < 0 || after > 999999) throw new Error('编号必须为 0–999999 的整数。');
           const concurrency = el('concurrency-mode').value === 'auto' ? 'auto' : Number(el('concurrency').value);
@@ -139,11 +175,15 @@
     const checkActive = () => {
       if (location.href !== startUrl) throw new Error('页面已切换，导出已停止。');
     };
-    status('正在读取 Grok 全部媒体页面…');
+    status('正在读取 Grok 全部媒体页面…', { stage: 'collecting', phase: 'collecting' });
     const found = await media.collectCurrent(fetch, scope, { checkActive,
-      onProgress: progress => status(`已读取 ${progress.pages} 页、${progress.posts} 条记录…`) });
+      onProgress: progress => status(`已读取 ${progress.pages} 页、${progress.posts} 条记录…`,
+        { stage: 'collecting', phase: 'collecting' }) });
     const promptCollection = options.prompts ? await media.resolvePrompts(found.entries, {
-      checkActive, onProgress: progress => status(`正在恢复提示词 ${progress.processed}/${progress.total} 个会话 · 已匹配 ${progress.resolved}/${found.entries.length} 个媒体…`)
+      checkActive, onProgress: progress => status(`正在恢复提示词 ${progress.processed}/${progress.total} 个会话 · 已匹配 ${progress.resolved}/${found.entries.length} 个媒体…`,
+        { stage: 'prompts', phase: 'prompts', processedConversations: progress.processed,
+          totalConversations: progress.total, resolvedImages: progress.resolved,
+          totalImages: found.entries.length, promptErrors: Math.max(0, found.entries.length - progress.resolved) })
     }) : null;
     let progress;
     try { progress = await worker({ action: 'getGrokProgress', folder: options.folder,
@@ -196,6 +236,7 @@
     }
     if (options.after > found.entries.length) throw new Error(`手动编号 ${options.after} 超出当前 ${found.entries.length} 个媒体。`);
     const selected = found.entries.filter(entry => selectedEntry(entry, options, completed));
+    const selectedGroupCount = options.prompts ? new Set(selected.map(entry => entry.groupName)).size : 0;
     const report = { schemaVersion: 1, kind: 'grok-download-results', extensionVersion: chrome.runtime.getManifest().version,
       page: startUrl, scope, createdAt: new Date().toISOString(), folder: options.folder,
       boundaryMode: options.mode, afterSequence: options.after, savePrompts: options.prompts,
@@ -210,7 +251,11 @@
       media: [], promptFiles: [], recoveryCleanup: [],
       downloadStatusMeaning: 'queued means Chrome accepted the download; completed means Chrome reported completion and the file exists.' };
     status(`已发现 ${found.entries.length} 个媒体，本次处理 ${selected.length} 个。`,
-      { total: selected.length, processed: 0, completed: 0, failed: 0 });
+      { stage: options.prompts ? 'grouping' : 'images', phase: options.prompts ? 'prompts' : 'transferring',
+        total: selected.length, processed: 0, completed: 0, failed: 0,
+        totalImages: found.entries.length, resolvedImages: found.entries.length - (promptCollection?.unresolved || 0),
+        totalConversations: promptCollection?.conversations, processedConversations: promptCollection?.conversations,
+        groupCount: promptGroups.size, selectedGroupCount, promptErrors: promptCollection?.unresolved || 0 });
     if (options.prompts) for (const entry of found.entries) {
       const prior = byId.get(entry.id);
       const previous = previousRecovery(entry, prior);
@@ -235,7 +280,11 @@
         if (options.mode === 'auto' && !selectedGroups.has(groupName) && savedPrompts.has(groupName)) continue;
         if (options.mode !== 'auto' && !selectedGroups.has(groupName)) continue;
         checkActive();
-        status(`正在保存提示词 ${report.promptFiles.length + 1}/${promptGroups.size}…`);
+        status(`正在保存提示词 ${report.promptFiles.length + 1}/${promptGroups.size}…`,
+          { stage: 'prompt-save', phase: 'prompts', total: selected.length,
+            totalImages: found.entries.length, resolvedImages: found.entries.length - (promptCollection?.unresolved || 0),
+            groupCount: promptGroups.size, selectedGroupCount, promptErrors: promptCollection?.unresolved || 0,
+            promptSaveErrors: report.promptFilesFailed });
         const record = { groupName, status: 'failed' };
         try {
           if (new TextEncoder().encode(prompt).length > 100000) throw new Error('Prompt exceeds supported TXT size');
@@ -263,7 +312,7 @@
       return Math.max(16 * 1048576, size * 4 + pixels);
     };
     const downloadStartedAt = Date.now();
-    let receivedBytes = 0;
+    let receivedBytes = 0, retrying = 0;
     let peakActive = 0, peakActiveBytes = 0;
     const waitWhileActive = async delayMs => {
       const deadline = Date.now() + delayMs;
@@ -288,7 +337,12 @@
           if (!error.retryable || round === 3) break;
           const delayMs = Math.max(error.retryAfterMs || 0, Math.min(30000, 2000 * 2 ** (round - 1)));
           controller.congest(`Grok HTTP ${error.httpStatus || 'network'} backoff`, Date.now() + delayMs);
-          await waitWhileActive(delayMs);
+          retrying++;
+          status(`媒体 ${entry.sequence} 暂时失败，正在等待第 ${round} 轮自动恢复…`,
+            { stage: 'images', phase: 'cooldown', retrying, failed: report.failed,
+              queued: report.queued, warnings: report.warnings, bytes: receivedBytes });
+          try { await waitWhileActive(delayMs); }
+          finally { retrying--; }
         }
       }
       lastError.retrievalAttempts = attempts;
@@ -385,8 +439,11 @@
         peakActive = Math.max(peakActive, update.peakActive);
         peakActiveBytes = Math.max(peakActiveBytes, update.peakActiveBytes);
         status(`媒体 ${update.completed}/${selected.length} · ${report.completed} 已完成 · ${report.failed} 失败 · ${update.active}/${update.concurrency} 并发`,
-          { total: selected.length, processed: update.completed, completed: report.completed,
-            failed: report.failed, active: update.active, limit: update.concurrency });
+          { stage: 'images', phase: update.coolingDown ? 'cooldown' : 'transferring',
+            total: selected.length, processed: update.completed, queued: report.queued,
+            failed: report.failed, warnings: report.warnings, retrying, bytes: receivedBytes,
+            active: update.active, limit: update.concurrency, reason: update.reason,
+            promptErrors: promptCollection?.unresolved || 0, promptSaveErrors: report.promptFilesFailed });
       }
     });
     checkActive();
@@ -410,8 +467,30 @@
       peakActive, peakActiveBytes, memoryBudgetBytes,
       elapsedMs: Date.now() - downloadStartedAt, receivedBytes,
       adaptive: controller.summary() };
+    const previousCheckpoint = await worker({ action: 'getMediaRetryCheckpoint', provider: 'Grok',
+      folder: options.folder }).catch(() => ({ checkpoint: null }));
+    const attempted = new Set(selected.map(entry => entry.id));
+    const failed = new Set((previousCheckpoint.checkpoint?.failed || []).filter(id => !attempted.has(id)));
+    const unresolved = new Set((previousCheckpoint.checkpoint?.unresolved || []).filter(id =>
+      !options.prompts || !found.entries.some(entry => entry.id === id)));
+    for (const item of report.media) if (item.status !== 'complete') failed.add(item.mediaId);
+    if (options.prompts) {
+      for (const entry of found.entries) if (!entry.prompt) unresolved.add(entry.id);
+      const failedGroups = new Set(report.promptFiles.filter(item => item.status !== 'complete').map(item => item.groupName));
+      for (const entry of found.entries) if (failedGroups.has(entry.groupName)) unresolved.add(entry.id);
+    }
+    try {
+      const saved = await worker({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: {
+        schemaVersion: 1, scope, folder: options.folder,
+        failed: [...failed], unresolved: [...unresolved] } });
+      if (saved.status !== 'saved') throw new Error('恢复清单未保存');
+    } catch (error) { report.retryCheckpointError = error.message; report.warnings++; report.status = 'partial'; }
     checkActive();
-    status('正在保存 Grok 结果报告…');
+    status('正在保存 Grok 结果报告…', { stage: 'images', phase: 'finalizing',
+      total: selected.length, processed: selected.length, queued: report.queued, failed: report.failed,
+      retrying: 0,
+      warnings: report.warnings, bytes: receivedBytes, promptErrors: promptCollection?.unresolved || 0,
+      promptSaveErrors: report.promptFilesFailed });
     try {
       const latest = await worker({ action: 'getGrokProgress', folder: options.folder,
         savePrompts: options.prompts });
@@ -444,13 +523,19 @@
           const options = await settings(media.scope(location.pathname));
           if (!options) { button.textContent = '⬇️ 导出 Grok 图片与视频'; return; }
           button.style.display = 'none';
-          panel = makeProgressPanel(() => { button.style.display = ''; button.textContent = '⬇️ 导出 Grok 图片与视频'; });
+          panel = makeProgressPanel(() => { button.style.display = ''; button.textContent = '⬇️ 导出 Grok 图片与视频'; }, options);
           const report = await run(media.scope(location.pathname), options,
             (message, progress) => panel.update(message, progress));
           panel.update(`${report.status === 'partial' ? '⚠️' : '✓'} ${report.completed}/${report.selected} 个媒体已完成，${report.failed} 个失败，${report.warnings} 条警告；详见结果报告`,
-            { total: report.selected, processed: report.selected, completed: report.completed, failed: report.failed });
+            { stage: 'images', phase: report.status === 'partial' ? 'completed with issues' : 'complete',
+              total: report.selected, processed: report.selected, queued: report.queued,
+              failed: report.failed, warnings: report.warnings,
+              bytes: report.downloadPerformance.receivedBytes,
+              promptErrors: report.promptCollection?.unresolved || 0,
+              promptSaveErrors: report.promptFilesFailed });
         } catch (error) { const message = exportErrorMessage(error);
-          if (panel) panel.update(`⚠️ ${message} 可关闭后重试。`);
+          if (panel) panel.update(`⚠️ ${message} 可关闭后重试。`,
+            { phase: /HTTP (?:401|403)/.test(error.message) ? 'blocked' : 'error' });
           else button.textContent = `⚠️ ${message} 点击重试。`; }
         finally { panel?.finish(); running = false; button.disabled = false; }
       };
