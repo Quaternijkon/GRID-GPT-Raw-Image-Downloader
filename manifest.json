@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "GRID Media Exporter",
-  "version": "3.0.1",
+  "version": "3.0.2",
   "description": "Export original ChatGPT, Grok, or Gemini media and metadata, with optional prompts.",
   "homepage_url": "https://github.com/Quaternijkon/GRID-GPT-Raw-Image-Downloader",
   "host_permissions": [

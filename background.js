@@ -67,8 +67,10 @@ async function geminiOriginal(baseUrl) {
   for (let step = 0; step < 8; step++) {
     if (!geminiMediaUrl(url) || seen.has(url)) throw new Error('Gemini 原图跳转地址无效或重复');
     seen.add(url);
-    const response = await fetch(url, { credentials: 'omit' });
-    if (!response.ok) throw Object.assign(new Error(`Gemini 原图 HTTP ${response.status}`), { httpStatus: response.status });
+    const mediaRequest = new URL(url);
+    const response = await fetch(url, { credentials: mediaRequest.pathname.startsWith('/rd-gg/') ? 'include' : 'omit' });
+    if (!response.ok) throw Object.assign(new Error(`Gemini 原图跳转第 ${step + 1} 步 HTTP ${response.status}`),
+      { httpStatus: response.status });
     if (!geminiMediaUrl(response.url)) throw new Error('Gemini 原图响应跳转到非媒体地址');
     const type = (response.headers.get('content-type') || '').split(';')[0].toLowerCase();
     if (type === 'text/plain') {

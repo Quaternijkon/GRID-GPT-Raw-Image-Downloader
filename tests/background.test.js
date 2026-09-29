@@ -39,12 +39,17 @@ function worker({ storageError = false, downloadId = 1, downloadHook, fetchImpl,
 test('Gemini worker validates a full size image redirect, exact bytes, and tracked destination', async () => {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
   const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;
-  const finalUrl = `https://lh3.google.com/rd-gg/${'B'.repeat(50)}=s0-d-I?alr=yes`;
+  const redirectUrl = `https://lh3.google.com/rd-gg/${'B'.repeat(50)}=s0-d-I?alr=yes`;
+  const finalUrl = `https://lh3.googleusercontent.com/rd-gg/${'C'.repeat(50)}=s0-d-I?alr=yes`;
   const calls = [], downloads = [];
-  const send = worker({ fetchImpl: async url => {
-    calls.push(url);
+  const send = worker({ fetchImpl: async (url, options) => {
+    calls.push({ url, credentials: options.credentials });
     if (url === `${base}=d-I?alr=yes`) return { ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'text/plain' : null }, text: async () => redirectUrl };
+    if (url === redirectUrl) return { ok: true, status: 200, url,
       headers: { get: key => key === 'content-type' ? 'text/plain' : null }, text: async () => finalUrl };
+    if (url === finalUrl && options.credentials !== 'include') return { ok: false, status: 403, url,
+      headers: { get: () => 'text/html' } };
     if (url === finalUrl) return { ok: true, status: 200, url,
       headers: { get: key => key === 'content-type' ? 'image/png' : null },
       arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) };
@@ -58,7 +63,11 @@ test('Gemini worker validates a full size image redirect, exact bytes, and track
   assert.equal(result.ok, true);
   assert.equal(result.bytes, png.length);
   assert.equal(result.mimeType, 'image/png');
-  assert.deepEqual(calls, [`${base}=d-I?alr=yes`, finalUrl]);
+  assert.deepEqual(calls, [
+    { url: `${base}=d-I?alr=yes`, credentials: 'omit' },
+    { url: redirectUrl, credentials: 'include' },
+    { url: finalUrl, credentials: 'include' }
+  ]);
   assert.deepEqual(Buffer.from(downloads[0].url.split(',')[1], 'base64'), png);
   assert.equal(downloads[0].filename, `gemini-images/000001-rc_${'f'.repeat(16)}.png`);
   const variantId = `rc_${'f'.repeat(16)}-${'a'.repeat(32)}`;
@@ -71,6 +80,23 @@ test('Gemini worker validates a full size image redirect, exact bytes, and track
   assert.equal((await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
     sequence: 1, mediaId: `rc_${'f'.repeat(16)}`, savePrompts: false,
     url: 'https://evil.example/image' }, page)).ok, false);
+});
+
+test('Gemini rejects an external redirect before any credentialed media request', async () => {
+  const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;
+  const calls = [];
+  const send = worker({ fetchImpl: async (url, options) => {
+    calls.push({ url, credentials: options.credentials });
+    return { ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'text/plain' : null },
+      text: async () => 'https://unrelated.example/private.png' };
+  } });
+  const result = await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
+    sequence: 1, mediaId: `rc_${'f'.repeat(16)}`, savePrompts: false, url: base },
+  'https://gemini.google.com/library');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /非媒体地址/);
+  assert.deepEqual(calls, [{ url: `${base}=d-I?alr=yes`, credentials: 'omit' }]);
 });
 
 test('Grok downloads are isolated to Grok Imagine and validate media, prompt, and report paths', async () => {

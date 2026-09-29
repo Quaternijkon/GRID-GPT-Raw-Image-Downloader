@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.0.2 — 2026-09-29
+
+- Fixed every Gemini original download failing with HTTP 403. The first `/gg/` descriptor is readable anonymously, but the validated `/rd-gg/` media hop requires the browser's Google media credentials. Credentials are now sent only to allowlisted Gemini media hosts at that hop; byte signature, size and SHA-256 checks remain in place before Chrome receives the exact image bytes.
+- A live Gemini image completed on disk with the same byte count and SHA-256 recorded in its result JSON. Automatic resume can retry the previous failed batch because no media download was queued by that run.
+
 ## 3.0.1 — 2026-09-29
 
 - Fixed Gemini Library exports stopping when one resource ID appeared with distinct image versions or when an asset URL refreshed across pages. The collector now matches a stable asset variant marker, preserves separate versions, and uses the latest permitted URL for repeated sightings of the same variant.
