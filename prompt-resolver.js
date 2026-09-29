@@ -42,7 +42,8 @@
     if (budget.remaining-- <= 0) return true; // Exhaustion is unknown, so fail closed.
     if (seen.has(value)) return false;
     seen.add(value);
-    if (value.content_type === 'image_asset_pointer') return true;
+    if (value.content_type === 'image_asset_pointer' ||
+        typeof value.asset_pointer === 'string' && value.asset_pointer) return true;
     for (const child of Array.isArray(value) ? value : Object.values(value)) {
       if (containsImagePointer(child, seen, budget)) return true;
     }

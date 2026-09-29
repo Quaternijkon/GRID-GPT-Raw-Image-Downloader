@@ -1,11 +1,17 @@
 {
   "manifest_version": 3,
-  "name": "GRID GPT Raw Image Downloader",
-  "version": "1.9.21",
-  "description": "Export original ChatGPT images and metadata, with optional prompt grouping.",
+  "name": "GRID Media Exporter",
+  "version": "3.0.1",
+  "description": "Export original ChatGPT, Grok, or Gemini media and metadata, with optional prompts.",
   "homepage_url": "https://github.com/Quaternijkon/GRID-GPT-Raw-Image-Downloader",
   "host_permissions": [
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://grok.com/*",
+    "https://assets.grok.com/*",
+    "https://imagine-public.x.ai/*",
+    "https://gemini.google.com/*",
+    "https://lh3.googleusercontent.com/*",
+    "https://lh3.google.com/*"
   ],
   "permissions": [
     "downloads",
@@ -30,6 +36,32 @@
         "prompt-conversations.js",
         "prompt-retry.js",
         "content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "https://grok.com/*"
+      ],
+      "js": [
+        "original-images.js",
+        "download-queue.js",
+        "prompt-groups.js",
+        "media-export-ui.js",
+        "grok-media.js",
+        "grok-content.js"
+      ],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://gemini.google.com/*"],
+      "js": [
+        "original-images.js",
+        "download-queue.js",
+        "prompt-groups.js",
+        "media-export-ui.js",
+        "gemini-media.js",
+        "gemini-content.js"
       ],
       "run_at": "document_idle"
     }

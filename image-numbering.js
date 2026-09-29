@@ -1,4 +1,4 @@
-/* Stateless numbering: a complete authoritative list, never a local history. */
+/* Stable numbering from a complete authoritative list; local progress only selects a boundary. */
 (() => {
   const RULE = 'creation-time-file-id-v1';
   const WIDTH = 6;
@@ -37,6 +37,20 @@
       throw new Error(`Enter a whole download boundary from 0 to ${MAX_SEQUENCE}`);
     }
     return number;
+  }
+
+  function resumeBoundary(all, records, baseline = null) {
+    if (!Array.isArray(all) || !Array.isArray(records)) throw new Error('Automatic download progress is unavailable');
+    const bySequence = new Map(records.filter(record => Number.isSafeInteger(record?.sequence))
+      .map(record => [record.sequence, record]));
+    let after = Number.isSafeInteger(baseline?.sequence) && baseline.sequence > 0 &&
+      all[baseline.sequence - 1]?.fileId === baseline.fileId ? baseline.sequence : 0;
+    for (const entry of all.slice(after)) {
+      const saved = bySequence.get(entry.sequence);
+      if (!saved || saved.fileId !== entry.fileId || saved.status !== 'complete') break;
+      after = entry.sequence;
+    }
+    return after;
   }
 
   function failure(message, issues = []) {
@@ -98,7 +112,7 @@
     } };
   }
 
-  const api = { RULE, WIDTH, MAX_SEQUENCE, creationTime, parseBoundary, plan };
+  const api = { RULE, WIDTH, MAX_SEQUENCE, creationTime, parseBoundary, resumeBoundary, plan };
   globalThis.ChatGPTImageNumbering = api;
   if (typeof module !== 'undefined') module.exports = api;
 })();

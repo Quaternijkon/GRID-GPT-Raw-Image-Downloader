@@ -113,10 +113,10 @@ test('SPA route guard adds, relabels and removes the button on supported routes 
   assert.equal(elements.has('cgpt-bulk-btn'), false);
   location.pathname = '/images'; location.href = 'https://chatgpt.com/images';
   observers.forEach(fn => fn());
-  assert.match(elements.get('cgpt-bulk-btn')?.textContent || '', /Images/);
+  assert.match(elements.get('cgpt-bulk-btn')?.textContent || '', /导出原图/);
   location.pathname = '/library/d/abc'; location.href = 'https://chatgpt.com/library/d/abc';
   observers.forEach(fn => fn());
-  assert.match(elements.get('cgpt-bulk-btn')?.textContent || '', /Folder/);
+  assert.match(elements.get('cgpt-bulk-btn')?.textContent || '', /导出原图/);
   location.pathname = '/c/abc'; location.href = 'https://chatgpt.com/c/abc';
   observers.forEach(fn => fn());
   assert.equal(elements.has('cgpt-bulk-btn'), false);
@@ -144,7 +144,9 @@ test('folder chooser stores the chosen concurrency and rejects invalid limits', 
   const writes = [];
   const { context, elements } = page({ sendMessage: (msg, cb) => {
     if (msg.action === 'getDownloadFolder') cb({ folder: 'images', concurrency: 4 });
-    else { writes.push(msg); cb({ status: 'saved', folder: 'images', concurrency: msg.concurrency }); }
+    else if (msg.action === 'getDownloadProgress') cb({ status: 'found', records: [], promptRecords: [] });
+    else if (msg.action === 'setDownloadFolder') { writes.push(msg); cb({ status: 'saved', folder: 'images', concurrency: msg.concurrency }); }
+    else cb({ status: 'missing' });
   } });
   const selection = vm.runInContext('chooseDownloadLocation()', context);
   await new Promise(setImmediate);
@@ -154,7 +156,7 @@ test('folder chooser stores the chosen concurrency and rejects invalid limits', 
   input.value = '13';
   await modal.querySelector('#bulk-dl-ok').onclick();
   assert.equal(writes.length, 0);
-  assert.match(modal.querySelector('#bulk-dl-error').textContent, /1 to 12/);
+  assert.match(modal.querySelector('#bulk-dl-error').textContent, /1–12/);
   input.value = '8';
   await modal.querySelector('#bulk-dl-ok').onclick();
   assert.equal(await selection, 'images');
@@ -163,25 +165,31 @@ test('folder chooser stores the chosen concurrency and rejects invalid limits', 
 });
 
 
-test('download boundary is explicit per run and is not sent to persistent preferences', async () => {
+test('automatic resume is the default; manual boundary is explicit per run and not a preference', async () => {
   const writes = [];
   const { context, elements } = page({ sendMessage: (msg, cb) => {
     if (msg.action === 'getDownloadFolder') cb({ folder: 'images', concurrency: 6 });
+    else if (msg.action === 'getDownloadProgress') cb({ status: 'found', records: [], promptRecords: [] });
     else { writes.push(msg); cb({ status: 'saved', folder: 'images', concurrency: 6 }); }
   } });
   let selected = vm.runInContext('chooseDownloadLocation()', context);
   await new Promise(setImmediate);
   let modal = elements.get('modal');
+  const mode = modal.shadowRoot.querySelector('#bulk-dl-boundary-mode');
+  assert.equal(mode.value, 'auto');
+  mode.value = 'manual'; mode.onchange();
   const boundary = modal.shadowRoot.querySelector('#bulk-dl-after');
   assert.equal(boundary.value, '0');
   boundary.value = '1600';
   await modal.shadowRoot.querySelector('#bulk-dl-ok').onclick();
   await selected;
   assert.equal(vm.runInContext('selectedAfterSequence', context), 1600);
+  assert.equal(vm.runInContext('selectedBoundaryMode', context), 'manual');
   assert.equal(Object.hasOwn(writes[0], 'afterSequence'), false);
   selected = vm.runInContext('chooseDownloadLocation()', context);
   await new Promise(setImmediate);
   modal = elements.get('modal');
+  assert.equal(modal.shadowRoot.querySelector('#bulk-dl-boundary-mode').value, 'auto');
   assert.equal(modal.shadowRoot.querySelector('#bulk-dl-after').value, '0');
   modal.shadowRoot.querySelector('#bulk-dl-cancel').onclick();
   await selected;
@@ -191,6 +199,7 @@ test('保存提示词 is a per-dialog opt-in and never enters stored preferences
   const writes = [];
   const { context, elements } = page({ sendMessage: (message, callback) => {
     if (message.action === 'getDownloadFolder') callback({ folder: 'images', concurrency: 6, savePrompts: true });
+    else if (message.action === 'getDownloadProgress') callback({ status: 'found', records: [], promptRecords: [] });
     else { writes.push(message); callback({ status: 'saved', folder: 'images', concurrency: 6 }); }
   } });
   let selected = vm.runInContext('chooseDownloadLocation()', context);
@@ -212,4 +221,26 @@ test('保存提示词 is a per-dialog opt-in and never enters stored preferences
   assert.equal(vm.runInContext('selectedSavePrompts', context), false);
   modal.shadowRoot.querySelector('#bulk-dl-cancel').onclick();
   await selected;
+});
+
+test('canonical image state keeps failed prompt placement in 未解析 and matches one-shot success after recovery', () => {
+  const { context } = page();
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const base = { sequence: 1, fileId: 'file_000000001', originalName: 'example.png',
+    name: '000001-example.png', mimeType: 'image/png', bytes: 100,
+    sha256: 'a'.repeat(64), groupName, promptStatus: 'resolved' };
+  context.canonicalFixture = { ...base, status: 'queued',
+    relativePath: `images/${groupName}/000001-example.png` };
+  const first = vm.runInContext("canonicalImage(canonicalFixture, 'images')", context);
+  context.canonicalFixture = { ...base, imageName: '000001-example.png',
+    imageRelativePath: `images/${groupName}/000001-example.png`, saveStatus: 'queued' };
+  const recovered = vm.runInContext("canonicalImage(canonicalFixture, 'images')", context);
+  assert.equal(JSON.stringify(first), JSON.stringify(recovered));
+  context.canonicalFixture = { ...base, imageRelativePath: 'images/未解析/000001-example.png',
+    saveStatus: 'failed', saveError: 'Replacement was rejected' };
+  const failed = vm.runInContext("canonicalImage(canonicalFixture, 'images')", context);
+  assert.equal(failed.relativePath, 'images/未解析/000001-example.png');
+  assert.equal(failed.groupName, '未解析');
+  assert.equal(failed.promptStatus, 'unresolved');
+  assert.equal(failed.promptError.code, 'prompt_save_failed');
 });

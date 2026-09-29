@@ -1,5 +1,47 @@
 # Changelog
 
+## 3.0.1 — 2026-09-29
+
+- Fixed Gemini Library exports stopping when one resource ID appeared with distinct image versions or when an asset URL refreshed across pages. The collector now matches a stable asset variant marker, preserves separate versions, and uses the latest permitted URL for repeated sightings of the same variant.
+- Distinct variants receive deterministic suffixes for download filenames and resume records. Existing single-variant Gemini IDs remain unchanged.
+- A temporarily empty Gemini list envelope now stays in bounded automatic recovery with visible retry progress instead of immediately asking the user to retry.
+
+## 3.0.0 — 2026-09-29
+
+- Added Gemini Library image export with complete paginated discovery, stable oldest-first numbering, automatic or manual resume, optional exact-response prompt matching, adaptive or manual concurrency, and a separate progress/result surface.
+- The worker resolves Gemini's full-size media chain on permitted Google image hosts, validates image signatures, preserves exact bytes and SHA-256, and tracks Chrome completion before marking files done. Unresolved prompts use `<folder>/未解析`; result reports can target failed items for recovery.
+- Aligned Grok's settings and progress surfaces with the new shared media UI, including download-folder access and report-based failed-item recovery.
+
+## 2.0.3 — 2026-09-29
+
+- Placed new ChatGPT and Grok unresolved media under `<folder>/未解析` instead of a sibling recovery folder. Existing sibling paths remain valid inputs to retry and can be cleaned after verified Grok relocation.
+- Grok retries overwrite the stable target filename; recovered prompts place the exact media in its final group and remove the prior unresolved file only after completion. Canonical ChatGPT state describes a failed prompt placement as still unresolved at its actual path.
+- Original-byte failures remain explicit report/checkpoint entries. No preview or placeholder image is written when original bytes are unavailable.
+
+## 2.0.2 — 2026-09-29
+
+- Connected Grok media downloads to the shared adaptive queue used by ChatGPT. Completed Grok downloads now feed throughput and latency observations; transient media errors trigger bounded retry and controller backoff.
+- Added planned byte admission using Grok asset sizes and a device-aware memory budget, so large videos reduce simultaneous work before the first completion. Grok settings now expose Auto and manual concurrency 1–12, while results record peak activity and controller history.
+
+## 2.0.1 — 2026-09-28
+
+- Fixed Grok V2 media keys being resolved against `grok.com` instead of the site's configured `assets.grok.com` asset server, which caused every original request to return HTTP 404.
+- Added exact Imagine conversation ancestry lookup for V2 assets whose list and detail metadata omit generation prompts. Output asset IDs must match the assistant response before the linked user message is saved as a prompt.
+- Treat Grok HTTP 401/403 and exhausted rate limits as blocking states instead of trying another list API or continuing prompt reads.
+
+## 2.0.0 — 2026-09-28
+
+- Added a separate Grok Imagine content flow on grok.com. The current page selects owned or saved media; users can include images, videos and optional prompt files, choose a folder and resume automatically or from a manual sequence.
+- Grok pagination supports the current Imagine assets API and the media post API, selecting the preferred source by page. Media records are ordered by creation time and stable identity. Original image and video responses are checked by file signature before saving their exact bytes.
+- Grok progress is stored separately from ChatGPT and verified against Chrome download state, file existence and path. Prompt mode has independent progress; a newly resolved prompt moves media out of the recovery folder only after the grouped replacement finishes. The result report distinguishes accepted downloads from completed files and records failures explicitly. Authenticated requests stay on Grok and its media hosts.
+- Fixed the existing ChatGPT prompt adapter case where an unknown content envelope with an `asset_pointer` field could be ignored instead of reported as unsupported.
+
+## 1.9.22 — 2026-09-28
+
+- Added automatic resume scoped to ChatGPT view, output folder and prompt mode. The settings dialog shows the locally completed sequence and keeps an optional manual boundary. Existing canonical indexes are reconciled against completed Chrome download history during migration.
+- Image submissions store Chrome download IDs. Resume checks completed state, file existence, path and stable file identity before skipping a contiguous prefix; queued or interrupted downloads remain eligible for retry. Manual boundaries become identity-checked starting points for subsequent automatic runs.
+- Prompt TXT downloads are tracked by content-addressed group. Automatic runs repair missing or unfinished prompt files while preserving full-history prompt grouping and absolute image numbers. Result reports include the detected starting and ending progress.
+
 ## 1.9.21 — 2026-09-28
 
 - Added the overwrite-updated `grid-index.json` canonical manifest. Initial exports write the complete image state; prompt and original retries merge only their affected identities. Downstream tools can read one stable index regardless of whether success was immediate or recovered.

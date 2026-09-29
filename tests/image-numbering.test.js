@@ -60,3 +60,20 @@ test('exclusive boundary supports none/all and rejects an impossible checkpoint'
   assert.equal(numbering.parseBoundary('001600'), 1600);
   for (const invalid of ['-1', '2.5', '', '1e3', 'NaN', '1000000']) assert.throws(() => numbering.parseBoundary(invalid));
 });
+
+test('automatic boundary stops at the first missing, unfinished, or changed identity', () => {
+  const all = numbering.plan(list([item('file_a', 1767225600), item('file_b', 1767225601),
+    item('file_c', 1767225602)]), originals).all;
+  const records = [
+    { sequence: 1, fileId: 'file_a', status: 'complete' },
+    { sequence: 2, fileId: 'file_b', status: 'in_progress' },
+    { sequence: 3, fileId: 'file_c', status: 'complete' }
+  ];
+  assert.equal(numbering.resumeBoundary(all, records), 1);
+  records[1].status = 'complete';
+  assert.equal(numbering.resumeBoundary(all, records), 3);
+  records[1].fileId = 'file_other';
+  assert.equal(numbering.resumeBoundary(all, records), 1);
+  assert.equal(numbering.resumeBoundary(all, records, { sequence: 2, fileId: 'file_b' }), 3);
+  assert.equal(numbering.resumeBoundary(all, records, { sequence: 2, fileId: 'file_wrong' }), 1);
+});

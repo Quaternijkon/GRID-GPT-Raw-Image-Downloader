@@ -27,7 +27,8 @@ function conversationFixture(records, conversationId, unresolved = []) {
 
 async function runFlow({ failImage = false, noOriginal = false, changePageDuringMetadata = false, gallerySize = 0, failGalleryPage = false, emptyDom = false, unavailableGallery = false, afterSequence = 0, concurrency = 6,
   savePrompts = false, promptRecords = null, unresolvedPrompts = [], failPrompt = false, changePageDuringPrompts = false,
-  metadataRequiresAuth = false, conversationStatus = 200, sessionAvailable = true } = {}) {
+  metadataRequiresAuth = false, conversationStatus = 200, sessionAvailable = true,
+  autoResume = false, priorCompleted = 0, priorInProgress = false } = {}) {
   let listener;
   const downloads = [];
   const galleryRequests = [];
@@ -35,6 +36,13 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
   const conversationReads = [], sessionRequests = [];
   let conversationRateLimits = 0;
   const panelUpdates = [];
+  const settings = {};
+  for (let sequence = 1; sequence <= priorCompleted; sequence++) {
+    const filename = `original-quality-test/${String(sequence).padStart(6, '0')}-old.png`;
+    downloads.push({ filename, url: 'data:image/png;base64,AA==' });
+    const key = `gridDownloadProgress:https://chatgpt.com/images\noriginal-quality-test\n${savePrompts ? 'prompts' : 'images'}\n${sequence}`;
+    settings[key] = { sequence, fileId: fixtureFileId(sequence - 1), downloadId: sequence, relativePath: filename };
+  }
   const chrome = {
     runtime: {
       onMessage: { addListener(fn) { listener = fn; } },
@@ -43,6 +51,10 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
         listener(message, { url: 'https://chatgpt.com/images/' }, callback || (() => {}));
       }
     },
+    storage: { local: {
+      get(_keys, callback) { callback({ ...settings }); },
+      set(values, callback) { Object.assign(settings, values); callback(); }
+    } },
     downloads: {
       download(options, callback) {
         if ((failImage && options.url.startsWith('data:image/')) || (failPrompt && options.url.startsWith('data:text/plain'))) {
@@ -53,10 +65,13 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
           downloads.push(options);
           callback(downloads.length);
         }
-      }
+      },
+      search(query, callback) { callback(downloads[query.id - 1]
+        ? [{ id: query.id, state: priorInProgress && query.id === priorCompleted ? 'in_progress' : 'complete',
+          exists: true, filename: `/Downloads/${downloads[query.id - 1].filename}` }] : []); }
     }
   };
-  const worker = vm.createContext({ chrome, console, setTimeout });
+  const worker = vm.createContext({ chrome, console, URL, setTimeout });
   worker.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), worker);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), worker);
   const elements = new Map();
@@ -167,6 +182,7 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
   vm.runInContext(fs.readFileSync('content.js', 'utf8'), context);
   vm.runInContext("chooseDownloadLocation = async () => 'original-quality-test'", context);
   vm.runInContext(`selectedAfterSequence = ${Number(afterSequence)}`, context);
+  vm.runInContext(`selectedBoundaryMode = ${JSON.stringify(autoResume ? 'auto' : 'manual')}`, context);
   vm.runInContext(`selectedConcurrency = ${JSON.stringify(concurrency)}`, context);
   vm.runInContext(`selectedSavePrompts = ${Boolean(savePrompts)}`, context);
   context.ChatGPTDownloadProgress.createPanel = () => ({ update(patch) { panelUpdates.push(patch); }, destroy() {} });
@@ -281,6 +297,47 @@ test('boundary equal to total produces no image downloads and clear no-new-image
   assert.match(button.textContent, /编号 100 之后没有新图片/);
 });
 
+test('automatic resume skips completed originals and still restores prompts for the full numbered history', async () => {
+  const records = [
+    { conversationId: 'conversation-a', prompt: 'Same prompt' },
+    { conversationId: 'conversation-b', prompt: 'Other prompt' },
+    { conversationId: 'conversation-a', prompt: 'Same prompt' }
+  ];
+  const { report, downloads, conversationRequests } = await runFlow({ gallerySize: 3,
+    savePrompts: true, promptRecords: records, autoResume: true, priorCompleted: 2 });
+  assert.equal(report.boundaryMode, 'auto');
+  assert.equal(report.afterSequence, 2);
+  assert.equal(report.selected, 1);
+  assert.equal(report.images[0].sequence, 3);
+  assert.equal(report.queued, 1);
+  assert.deepEqual(conversationRequests.sort(), ['conversation-a', 'conversation-b']);
+  assert.equal(downloads.filter(item => item.url.startsWith('data:image/')).length, 3);
+  assert.equal(downloads.filter(item => item.url.startsWith('data:text/plain')).length, 2,
+    'first tracked prompt run repairs historical prompt files too');
+});
+
+test('automatic resume waits for an existing Chrome transfer instead of submitting a duplicate', async () => {
+  const { report, downloads } = await runFlow({ gallerySize: 3, autoResume: true,
+    priorCompleted: 2, priorInProgress: true });
+  assert.equal(report.status, 'progress-blocked');
+  assert.equal(downloads.filter(item => item.url.startsWith('data:image/')).length, 2);
+});
+
+test('automatic prompt mode repairs missing TXT files when every image is already complete', async () => {
+  const records = [
+    { conversationId: 'conversation-a', prompt: 'Same prompt' },
+    { conversationId: 'conversation-b', prompt: 'Other prompt' },
+    { conversationId: 'conversation-a', prompt: 'Same prompt' }
+  ];
+  const { report, downloads, button } = await runFlow({ gallerySize: 3, savePrompts: true,
+    promptRecords: records, autoResume: true, priorCompleted: 3 });
+  assert.equal(report.afterSequence, 3);
+  assert.equal(report.selected, 0);
+  assert.equal(report.prompts.promptFilesToSave, 2);
+  assert.equal(downloads.filter(item => item.url.startsWith('data:text/plain')).length, 2);
+  assert.match(button.textContent, /已处理 2 个提示词文件/);
+});
+
 const promptFixtureRecords = [
   { conversationId: 'conversation-a', prompt: '相同提示词' },
   { conversationId: 'conversation-b', prompt: 'Other prompt' },
@@ -344,7 +401,7 @@ test('authenticated 404 routes images to unresolved with the accurate cause and 
   assert.equal(downloads.some(item => item.url.startsWith('data:text/plain')), false);
   assert.deepEqual(report.prompts.errorSummary, [{ code: 'http_error', phase: 'conversation', httpStatus: 404,
     bearerSent: true, authRetried: false, affectedImages: 3, affectedConversations: 2 }]);
-  assert.match(button.textContent, /3 images in 未解析/);
+  assert.match(button.textContent, /3 张进入恢复区/);
   assert.ok(downloads.filter(item => item.url.startsWith('data:image/')).every(item => item.filename.includes('/未解析/')));
   assert.ok(panelUpdates.some(update => update.message?.includes('HTTP 404')));
   assert.doesNotMatch(JSON.stringify(report), /fixture-only-token|private-server-error-fixture/);
@@ -392,6 +449,7 @@ test('mixed known and unknown prompts preserve global filenames and original byt
   assert.equal(report.images[1].promptError.code, 'target_not_found');
   assert.equal(report.warnings, 1);
   const unknown = downloads.find(item => item.filename.includes('/未解析/'));
+  assert.ok(unknown.filename.startsWith('original-quality-test/未解析/'));
   assert.match(unknown.filename, /000002-/);
   assert.equal(unknown.conflictAction, 'uniquify');
   assert.deepEqual(Buffer.from(unknown.url.split(',')[1], 'base64'), imageBytes);
@@ -423,7 +481,7 @@ test('navigation during prompt restoration admits no downloads', async () => {
     savePrompts: true, changePageDuringPrompts: true });
   assert.equal(downloads.length, 0);
   assert.equal(button.disabled, false);
-  assert.match(button.textContent, /Page changed/);
+  assert.match(button.textContent, /导出原图/);
 });
 
 

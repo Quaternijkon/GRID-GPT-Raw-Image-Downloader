@@ -2,8 +2,10 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
+const webcrypto = require('node:crypto').webcrypto;
 
-function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
+function worker({ storageError = false, downloadId = 1, downloadHook, fetchImpl,
+  downloadStates = new Map(), downloadHistory = [], removed = [], erased = [] } = {}) {
   let listener;
   const settings = {};
   const chrome = {
@@ -11,9 +13,10 @@ function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
     downloads: { download(opts, callback) {
       if (downloadHook) downloadHook(opts, callback, chrome);
       else callback(downloadId);
-    }, search(query, callback) { callback([{ id: query.id, state: 'complete' }]); },
-    cancel(_id, callback) { callback(); }, removeFile(_id, callback) { callback(); },
-    erase(query, callback) { callback([{ id: query.id }]); } },
+    }, search(query, callback) { callback(query.id === undefined ? downloadHistory :
+      [downloadStates.get(query.id) || { id: query.id, state: 'complete' }]); },
+    cancel(_id, callback) { callback(); }, removeFile(id, callback) { removed.push(id); callback(); },
+    erase(query, callback) { erased.push(query.id); callback([{ id: query.id }]); } },
     storage: { local: {
       set(data, callback) {
         if (storageError) chrome.runtime.lastError = { message: 'Storage unavailable' };
@@ -25,11 +28,179 @@ function worker({ storageError = false, downloadId = 1, downloadHook } = {}) {
       }
     } }
   };
-  const context = vm.createContext({ chrome, console, URL, setTimeout, clearTimeout, Date });
+  const context = vm.createContext({ chrome, console, URL, setTimeout, clearTimeout, Date,
+    crypto: webcrypto, btoa, fetch: fetchImpl });
   context.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), context);
-  return message => new Promise(resolve => listener(message, { url: 'https://chatgpt.com/images' }, resolve));
+  return (message, senderUrl = 'https://chatgpt.com/images') =>
+    new Promise(resolve => listener(message, { url: senderUrl }, resolve));
 }
+
+test('Gemini worker validates a full size image redirect, exact bytes, and tracked destination', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
+  const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;
+  const finalUrl = `https://lh3.google.com/rd-gg/${'B'.repeat(50)}=s0-d-I?alr=yes`;
+  const calls = [], downloads = [];
+  const send = worker({ fetchImpl: async url => {
+    calls.push(url);
+    if (url === `${base}=d-I?alr=yes`) return { ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'text/plain' : null }, text: async () => finalUrl };
+    if (url === finalUrl) return { ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'image/png' : null },
+      arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) };
+    throw new Error(`Unexpected image fetch ${url}`);
+  }, downloadHook: (options, callback) => { downloads.push(options); callback(87); },
+  downloadStates: new Map([[87, { id: 87, state: 'complete', exists: true,
+    filename: `/Downloads/gemini-images/000001-rc_${'f'.repeat(16)}.png` }]]) });
+  const page = 'https://gemini.google.com/library';
+  const result = await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
+    sequence: 1, mediaId: `rc_${'f'.repeat(16)}`, savePrompts: false, url: base }, page);
+  assert.equal(result.ok, true);
+  assert.equal(result.bytes, png.length);
+  assert.equal(result.mimeType, 'image/png');
+  assert.deepEqual(calls, [`${base}=d-I?alr=yes`, finalUrl]);
+  assert.deepEqual(Buffer.from(downloads[0].url.split(',')[1], 'base64'), png);
+  assert.equal(downloads[0].filename, `gemini-images/000001-rc_${'f'.repeat(16)}.png`);
+  const variantId = `rc_${'f'.repeat(16)}-${'a'.repeat(32)}`;
+  const variant = await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
+    sequence: 2, mediaId: variantId, savePrompts: false, url: base }, page);
+  assert.equal(variant.ok, true);
+  assert.equal(downloads[1].filename, `gemini-images/000002-${variantId}.png`);
+  const progress = await send({ action: 'getGeminiProgress', folder: 'gemini-images', savePrompts: false }, page);
+  assert.equal(progress.records[0].status, 'complete');
+  assert.equal((await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
+    sequence: 1, mediaId: `rc_${'f'.repeat(16)}`, savePrompts: false,
+    url: 'https://evil.example/image' }, page)).ok, false);
+});
+
+test('Grok downloads are isolated to Grok Imagine and validate media, prompt, and report paths', async () => {
+  const calls = [];
+  const send = worker({ downloadHook: (options, callback) => { calls.push(options); callback(calls.length); } });
+  const page = 'https://grok.com/imagine/saved';
+  const url = 'blob:https://grok.com/01234567-89ab-cdef-0123-456789abcdef';
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const image = { action: 'grokDownload', kind: 'media', folder: 'grok-media',
+    sequence: 1, mediaId: 'asset_000000001', mediaType: 'image', savePrompts: true, groupName,
+    name: '000001-asset_000000001.png', url };
+  assert.equal((await send(image, page)).relativePath,
+    `grok-media/${groupName}/000001-asset_000000001.png`);
+  assert.equal(calls[0].conflictAction, 'uniquify');
+  assert.equal((await send({ ...image, retry: true }, page)).ok, true);
+  assert.equal(calls.at(-1).conflictAction, 'overwrite');
+  assert.equal((await send({ ...image, mediaType: 'video' }, page)).ok, false);
+  assert.equal((await send({ ...image, name: '../bad.png' }, page)).ok, false);
+  assert.equal((await send({ ...image, url: 'blob:https://evil.example/01234567-89ab-cdef-0123-456789abcdef' }, page)).ok, false);
+  assert.equal((await send(image, 'https://chatgpt.com/images')).status, 'unknown');
+  assert.equal((await send({ action: 'downloadFile', folder: 'grok-media', name: 'bad.png',
+    url: 'data:image/png;base64,AA==' }, page)).status, 'invalid');
+  assert.equal((await send({ action: 'grokDownload', kind: 'prompt', folder: 'grok-media', groupName,
+    name: 'prompt.txt', url: 'data:text/plain;charset=utf-8,hello' }, page)).ok, true);
+  assert.equal(calls.at(-1).conflictAction, 'overwrite');
+  assert.equal((await send({ action: 'grokDownload', kind: 'prompt', folder: 'grok-media', groupName,
+    name: 'prompt.txt', retry: true, url: 'data:text/plain;charset=utf-8,hello' }, page)).ok, false);
+  assert.equal((await send({ action: 'grokDownload', kind: 'report', folder: 'grok-media',
+    name: 'grok-download-results.json', url: 'data:application/json;charset=utf-8,%7B%7D' }, page)).ok, true);
+  assert.equal(calls.at(-1).conflictAction, 'uniquify');
+});
+
+test('Grok progress requires Chrome completion and separates owned from saved media', async () => {
+  const states = new Map([[77, { id: 77, state: 'complete', exists: true,
+    filename: '/Downloads/grok-media/000001-asset_000000001.mp4' }]]);
+  const send = worker({ downloadId: 77, downloadStates: states });
+  const saved = 'https://grok.com/imagine/saved';
+  const image = { action: 'grokDownload', kind: 'media', folder: 'grok-media',
+    sequence: 1, mediaId: 'asset_000000001', mediaType: 'video', savePrompts: false,
+    name: '000001-asset_000000001.mp4',
+    url: 'blob:https://grok.com/01234567-89ab-cdef-0123-456789abcdef' };
+  assert.equal((await send(image, saved)).ok, true);
+  const query = { action: 'getGrokProgress', folder: 'grok-media', savePrompts: false };
+  assert.equal((await send(query, saved)).records[0].status, 'complete');
+  assert.equal((await send({ ...query, savePrompts: true }, saved)).records.length, 0);
+  assert.equal((await send(query, 'https://grok.com/imagine')).records.length, 0);
+  states.set(77, { id: 77, state: 'complete', exists: false });
+  assert.equal((await send(query, saved)).records[0].status, 'missing');
+});
+
+test('Grok concurrency preference is persisted separately from the ChatGPT setting', async () => {
+  const send = worker();
+  const grokPage = 'https://grok.com/imagine';
+  assert.equal((await send({ action: 'getGrokSettings' }, grokPage)).concurrency, 'auto');
+  assert.equal((await send({ action: 'setGrokSettings', folder: 'grok-media', concurrency: 4 }, grokPage)).concurrency, 4);
+  assert.equal((await send({ action: 'getGrokSettings' }, grokPage)).concurrency, 4);
+  assert.equal((await send({ action: 'getDownloadFolder' })).concurrency, 'auto');
+  assert.equal((await send({ action: 'setGrokSettings', folder: 'grok-media', concurrency: 'auto' }, grokPage)).concurrency, 'auto');
+});
+
+test('Grok recovery cleanup removes only the verified old file after the grouped replacement completes', async () => {
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const oldRelativePath = 'grok-media-recovery/未解析/000001-asset_000000001.png';
+  const newRelativePath = `grok-media/${groupName}/000001-asset_000000001.png`;
+  const removed = [], erased = [];
+  const send = worker({ downloadId: 91, removed, erased, downloadStates: new Map([
+    [90, { id: 90, state: 'complete', exists: true, filename: `/Downloads/${oldRelativePath}` }],
+    [91, { id: 91, state: 'complete', exists: true, filename: `/Downloads/${newRelativePath}` }]
+  ]) });
+  const page = 'https://grok.com/imagine';
+  assert.equal((await send({ action: 'grokDownload', kind: 'media', folder: 'grok-media',
+    savePrompts: true, groupName, sequence: 1, mediaId: 'asset_000000001', mediaType: 'image',
+    name: '000001-asset_000000001.png',
+    previousRecovery: { downloadId: 90, relativePath: oldRelativePath },
+    url: 'blob:https://grok.com/01234567-89ab-cdef-0123-456789abcdef' }, page)).ok, true);
+  const cleanup = { action: 'cleanupGrokRecovery', folder: 'grok-media', sequence: 1,
+    mediaId: 'asset_000000001', groupName, oldDownloadId: 90, oldRelativePath,
+    newDownloadId: 91 };
+  assert.equal((await send({ ...cleanup, oldRelativePath: 'grok-media/other.png' }, page)).status, 'invalid');
+  assert.deepEqual(removed, []);
+  assert.equal((await send(cleanup, page)).cleanupStatus, 'old-file-removed');
+  assert.deepEqual(removed, [90]);
+  assert.deepEqual(erased, [90]);
+  const progress = await send({ action: 'getGrokProgress', folder: 'grok-media', savePrompts: true }, page);
+  assert.equal(progress.records[0].previousRecovery, undefined);
+});
+
+test('Grok moves an old sibling recovery file into the in-folder unresolved destination', async () => {
+  const oldRelativePath = 'grok-media-recovery/未解析/000001-asset_000000001.png';
+  const newRelativePath = 'grok-media/未解析/000001-asset_000000001.png';
+  const removed = [];
+  const send = worker({ downloadId: 91, removed, downloadStates: new Map([
+    [90, { id: 90, state: 'complete', exists: true, filename: `/Downloads/${oldRelativePath}` }],
+    [91, { id: 91, state: 'complete', exists: true, filename: `/Downloads/${newRelativePath}` }]
+  ]) });
+  const page = 'https://grok.com/imagine';
+  const saved = await send({ action: 'grokDownload', kind: 'media', folder: 'grok-media',
+    savePrompts: true, groupName: '未解析', sequence: 1, mediaId: 'asset_000000001',
+    mediaType: 'image', retry: true, name: '000001-asset_000000001.png',
+    previousRecovery: { downloadId: 90, relativePath: oldRelativePath },
+    url: 'blob:https://grok.com/01234567-89ab-cdef-0123-456789abcdef' }, page);
+  assert.equal(saved.relativePath, newRelativePath);
+  const cleanup = await send({ action: 'cleanupGrokRecovery', folder: 'grok-media',
+    sequence: 1, mediaId: 'asset_000000001', groupName: '未解析', oldDownloadId: 90,
+    oldRelativePath, newDownloadId: 91 }, page);
+  assert.equal(cleanup.cleanupStatus, 'old-file-removed');
+  assert.deepEqual(removed, [90]);
+});
+
+test('Grok prompt recovery removes an unresolved file from the same output folder', async () => {
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const oldRelativePath = 'grok-media/未解析/000001-asset_000000001.png';
+  const newRelativePath = `grok-media/${groupName}/000001-asset_000000001.png`;
+  const removed = [];
+  const send = worker({ downloadId: 91, removed, downloadStates: new Map([
+    [90, { id: 90, state: 'complete', exists: true, filename: `/Downloads/${oldRelativePath}` }],
+    [91, { id: 91, state: 'complete', exists: true, filename: `/Downloads/${newRelativePath}` }]
+  ]) });
+  const page = 'https://grok.com/imagine';
+  assert.equal((await send({ action: 'grokDownload', kind: 'media', folder: 'grok-media',
+    savePrompts: true, groupName, sequence: 1, mediaId: 'asset_000000001',
+    mediaType: 'image', retry: true, name: '000001-asset_000000001.png',
+    previousRecovery: { downloadId: 90, relativePath: oldRelativePath },
+    url: 'blob:https://grok.com/01234567-89ab-cdef-0123-456789abcdef' }, page)).ok, true);
+  const cleanup = await send({ action: 'cleanupGrokRecovery', folder: 'grok-media',
+    sequence: 1, mediaId: 'asset_000000001', groupName, oldDownloadId: 90,
+    oldRelativePath, newDownloadId: 91 }, page);
+  assert.equal(cleanup.cleanupStatus, 'old-file-removed');
+  assert.deepEqual(removed, [90]);
+});
 
 test('worker reports failed storage writes/reads rather than claiming saved', async () => {
   const send = worker({ storageError: true });
@@ -99,6 +270,88 @@ test('Auto preference is persisted without coercing it into a manual limit', asy
   const saved = await send({ action: 'setDownloadFolder', folder: 'images', concurrency: 'auto' });
   assert.equal(saved.concurrency, 'auto');
   assert.equal((await send({ action: 'getDownloadFolder' })).concurrency, 'auto');
+});
+
+test('automatic progress waits for disk completion and keeps page, folder, and prompt mode separate', async () => {
+  const states = new Map([[12, { id: 12, state: 'in_progress' }]]);
+  const send = worker({ downloadId: 12, downloadStates: states });
+  const page = 'https://chatgpt.com/images/';
+  const tracking = { page, sequence: 3, fileId: 'file_abc123', savePrompts: false };
+  assert.equal((await send({ action: 'downloadFile', folder: 'images', name: '000003-image.png',
+    url: 'data:image/png;base64,AA==', tracking })).ok, true);
+  const query = { action: 'getDownloadProgress', page, folder: 'images', savePrompts: false };
+  assert.equal((await send(query)).records[0].status, 'in_progress');
+  states.set(12, { id: 12, state: 'complete', exists: true, filename: '/Downloads/images/000003-image.png' });
+  assert.equal((await send(query)).records[0].status, 'complete');
+  states.set(12, { id: 12, state: 'complete', exists: true, filename: '/Downloads/images/000003-image (1).png' });
+  assert.equal((await send(query)).records[0].status, 'complete');
+  states.set(12, { id: 12, state: 'complete', exists: true, filename: '/Downloads/other/000003-image.png' });
+  assert.notEqual((await send(query)).records[0].status, 'complete');
+  states.set(12, { id: 12, state: 'complete', exists: false });
+  assert.notEqual((await send(query)).records[0].status, 'complete');
+  assert.equal((await send({ ...query, folder: 'other' })).records.length, 0);
+  assert.equal((await send({ ...query, savePrompts: true })).records.length, 0);
+  assert.equal((await send({ ...query, page: 'https://chatgpt.com/library/d/abc' })).status, 'invalid');
+});
+
+test('manual boundary and prompt file progress are stored for automatic resume', async () => {
+  const send = worker();
+  const page = 'https://chatgpt.com/images/';
+  assert.equal((await send({ action: 'setDownloadBaseline', page, folder: 'images',
+    savePrompts: true, sequence: 2, fileId: 'file_abc123' })).status, 'saved');
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  assert.equal((await send({ action: 'downloadFile', page, folder: 'images', kind: 'prompt',
+    groupName, name: 'prompt.txt', conflictAction: 'overwrite',
+    url: 'data:text/plain;charset=utf-8,hi', promptTracking: { page, groupName } })).ok, true);
+  const response = await send({ action: 'getDownloadProgress', page, folder: 'images', savePrompts: true });
+  assert.equal(response.baseline.sequence, 2);
+  assert.equal(response.promptRecords[0].groupName, groupName);
+  assert.equal(response.promptRecords[0].status, 'complete');
+});
+
+test('automatic progress recovers pre-upgrade completed files from the canonical index and Chrome history', async () => {
+  const send = worker({ downloadHistory: [
+    { id: 41, state: 'complete', exists: true, filename: '/Downloads/images/000001-old.png' },
+    { id: 42, state: 'complete', exists: false, filename: '/Downloads/images/000002-old.png' }
+  ], downloadStates: new Map([[41, { id: 41, state: 'complete', exists: true,
+    filename: '/Downloads/images/000001-old.png' }]]) });
+  const page = 'https://chatgpt.com/images/';
+  const index = { kind: 'grid-canonical-index', layoutVersion: 2, page, folder: 'images',
+    images: [
+      { sequence: 1, fileId: 'file_000000001', status: 'available', groupName: null,
+        relativePath: 'images/000001-old.png' },
+      { sequence: 2, fileId: 'file_000000002', status: 'available', groupName: null,
+        relativePath: 'images/000002-old.png' }
+    ] };
+  assert.equal((await send({ action: 'saveCanonicalIndex', index })).status, 'saved');
+  const query = { action: 'getDownloadProgress', page, folder: 'images', savePrompts: false };
+  const first = await send(query);
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0].sequence, 1);
+  assert.equal(first.records[0].status, 'complete');
+  assert.equal((await send(query)).records.length, 1, 'migration is persisted for later runs');
+});
+
+test('pre-upgrade prompt groups are recognized only when their TXT download is complete', async () => {
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const imagePath = `images/${groupName}/000001-old.png`;
+  const promptPath = `images/${groupName}/prompt.txt`;
+  const history = [
+    { id: 51, state: 'complete', exists: true, filename: `/Downloads/${imagePath}` },
+    { id: 52, state: 'complete', exists: true, filename: `/Downloads/${promptPath}` }
+  ];
+  const send = worker({ downloadHistory: history,
+    downloadStates: new Map(history.map(item => [item.id, item])) });
+  const page = 'https://chatgpt.com/images/';
+  assert.equal((await send({ action: 'saveCanonicalIndex', index: {
+    kind: 'grid-canonical-index', layoutVersion: 2, page, folder: 'images', images: [
+      { sequence: 1, fileId: 'file_000000001', status: 'available', groupName,
+        promptStatus: 'resolved', relativePath: imagePath }
+    ] } })).status, 'saved');
+  const progress = await send({ action: 'getDownloadProgress', page, folder: 'images', savePrompts: true });
+  assert.equal(progress.records[0].status, 'complete');
+  assert.equal(progress.promptRecords[0].groupName, groupName);
+  assert.equal(progress.promptRecords[0].status, 'complete');
 });
 
 test('prompt retry checkpoints are validated, scoped by page and replaceable', async () => {
@@ -209,9 +462,14 @@ test('failed-original retry overwrites the exact destination and waits for compl
   const send = worker({ downloadHook: (opts, callback) => { calls.push(opts); callback(92); } });
   const result = await send({ action: 'downloadFile', kind: 'retry-image', conflictAction: 'overwrite',
     folder: 'images', unresolved: true, name: '000068-example.png', url: 'data:image/png;base64,AA==' });
-  assert.equal(result.relativePath, 'images-recovery/未解析/000068-example.png');
+  assert.equal(result.relativePath, 'images/未解析/000068-example.png');
   assert.equal(result.retryCompleted, true);
   assert.equal(calls[0].conflictAction, 'overwrite');
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const grouped = await send({ action: 'downloadFile', kind: 'retry-image', conflictAction: 'overwrite',
+    folder: 'images', groupName, name: '000069-example.png', url: 'data:image/png;base64,AA==' });
+  assert.equal(grouped.relativePath, `images/${groupName}/000069-example.png`);
+  assert.equal(calls[1].conflictAction, 'overwrite');
 });
 
 test('prompt filename rejection has no duplicate-name fallback, image fallback keeps its group', async () => {
@@ -236,7 +494,7 @@ test('unresolved destination is a fixed image-only folder with no overwrite or a
   const send = worker({ downloadHook: (options, callback) => { calls.push(options); callback(12); } });
   const request = { action: 'downloadFile', folder: 'images', unresolved: true,
     name: '000002-image.png', url: 'data:image/png;base64,AA==' };
-  assert.equal((await send(request)).relativePath, 'images-recovery/未解析/000002-image.png');
+  assert.equal((await send(request)).relativePath, 'images/未解析/000002-image.png');
   assert.equal(calls[0].conflictAction, 'uniquify');
   for (const change of [{ groupNumber: 0 }, { unresolved: '../escape' }, { unresolved: false },
     { conflictAction: 'overwrite' }, { url: 'data:application/json,%7B%7D' },
@@ -258,5 +516,5 @@ test('invalid filename retry stays in unresolved and preserves the global prefix
   const result = await send({ action: 'downloadFile', folder: 'images', unresolved: true,
     name: '000002-image.png', fallbackName: '000002-file_test.png', url: 'data:image/png;base64,AA==' });
   assert.equal(result.ok, true);
-  assert.deepEqual(calls, ['images-recovery/未解析/000002-image.png', 'images-recovery/未解析/000002-file_test.png']);
+  assert.deepEqual(calls, ['images/未解析/000002-image.png', 'images/未解析/000002-file_test.png']);
 });

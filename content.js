@@ -20,6 +20,7 @@ const imageLists = globalThis.ChatGPTImageLists;
 const downloadQueue = globalThis.ChatGPTDownloadQueue;
 const imageNumbering = globalThis.ChatGPTImageNumbering;
 let selectedAfterSequence = 0;
+let selectedBoundaryMode = 'auto';
 const promptResolver = globalThis.ChatGPTPromptResolver;
 const promptGroups = globalThis.ChatGPTPromptGroups;
 const promptConversations = globalThis.ChatGPTPromptConversations;
@@ -119,8 +120,10 @@ function sendToWorker(message, timeoutMs = 60000) {
   });
 }
 
-async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, groupName, unresolved, kind, conflictAction, retrySequence, replaceDownloadId, workerTimeoutMs } = {}) {
+async function requestDownload(url, name, folder, { fallbackName, onAccepted, groupNumber, groupName, unresolved, kind, conflictAction, retrySequence, replaceDownloadId, workerTimeoutMs, tracking, promptTracking } = {}) {
   const response = await sendToWorker({ action: 'downloadFile', url, name, folder, fallbackName,
+    ...(tracking ? { tracking } : {}),
+    ...(promptTracking ? { promptTracking } : {}),
     ...(groupNumber !== undefined ? { groupNumber } : {}),
     ...(groupName !== undefined ? { groupName } : {}),
     ...(unresolved === true ? { unresolved: true } : {}),
@@ -137,7 +140,13 @@ async function requestPromptTextDownload(url, name, folder, options, checkActive
   let lastError;
   for (let attempt = 1; attempt <= 3; attempt++) {
     checkActive();
-    try { return { downloadId: await requestDownload(url, name, folder, options), attempts: attempt }; }
+    try {
+      let receipt;
+      const downloadId = await requestDownload(url, name, folder, {
+        ...options, onAccepted: value => { receipt = value; options.onAccepted?.(value); }
+      });
+      return { downloadId, attempts: attempt, ...(receipt?.trackingError ? { trackingError: receipt.trackingError } : {}) };
+    }
     catch (error) {
       lastError = error;
       if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1000));
@@ -285,17 +294,23 @@ async function persistImageRetryCheckpoint(results, folder) {
 }
 
 function canonicalImage(item, folder) {
-  const groupName = item.groupName || null;
+  const savedPath = item.imageRelativePath || item.relativePath;
+  const inUnresolved = typeof savedPath === 'string' &&
+    (savedPath.startsWith(`${folder}/未解析/`) || savedPath.startsWith(`${folder}-recovery/未解析/`));
+  const placementFailed = item.saveStatus === 'failed' && inUnresolved;
+  const groupName = inUnresolved && (placementFailed || item.promptStatus === 'unresolved')
+    ? '未解析' : item.groupName || null;
   const fallbackName = originalImages.filename(item.originalName || item.name || item.fileId,
     item.mimeType || 'image/png', item.sequence - 1, imageNumbering.WIDTH);
-  const destinationRoot = groupName === '未解析' ? `${folder}-recovery` : folder;
-  const relativePath = item.imageRelativePath || item.relativePath ||
-    `${destinationRoot}/${groupName ? groupName + '/' : ''}${fallbackName}`;
+  const relativePath = savedPath ||
+    `${folder}/${groupName ? groupName + '/' : ''}${fallbackName}`;
+  const promptStatus = placementFailed ? 'unresolved' : item.promptStatus || 'disabled';
   return { sequence: item.sequence, fileId: item.fileId,
     name: item.imageName || item.name || fallbackName, relativePath,
     status: ['queued', 'reconciled-local'].includes(item.status) || item.saveStatus === 'queued' ? 'available' : 'failed',
-    groupName, promptStatus: item.promptStatus || 'disabled',
-    promptError: item.promptStatus === 'unresolved' ? item.promptError || null : null,
+    groupName, promptStatus,
+    promptError: placementFailed ? { code: 'prompt_save_failed', message: item.saveError || 'Prompt placement failed' } :
+      promptStatus === 'unresolved' ? item.promptError || null : null,
     ...(Number.isFinite(item.bytes) ? { bytes: item.bytes } : {}),
     ...(typeof item.mimeType === 'string' ? { mimeType: item.mimeType } : {}),
     ...(typeof item.sha256 === 'string' ? { sha256: item.sha256 } : {}) };
@@ -437,6 +452,8 @@ async function retryFailedImages(plan, { folder, ensureSameView, panel, status }
       let receipt = null;
       record.downloadId = await requestDownload(imageDataUrl, name, folder, {
         kind: 'retry-image', conflictAction: 'overwrite', workerTimeoutMs: 90000,
+        tracking: { page: plan.page, sequence: entry.sequence, fileId: entry.fileId,
+          savePrompts: plan.savePrompts === true },
         ...(entry.groupName === '未解析' ? { unresolved: true } :
           entry.groupNumber !== undefined ? { groupNumber: entry.groupNumber } :
             entry.groupName ? { groupName: entry.groupName } : {}),
@@ -450,7 +467,9 @@ async function retryFailedImages(plan, { folder, ensureSameView, panel, status }
         sha256: await originalImages.fingerprint(asset.blob), source: asset.source,
         verification: asset.verification, validation: asset.validation,
         retrievalAttempts: asset.retrievalAttempts, retrievalErrors: asset.retrievalErrors,
-        recoveryRounds: asset.recoveryRounds, warnings: asset.warnings || [], status: 'queued' });
+        recoveryRounds: asset.recoveryRounds,
+        warnings: [...(asset.warnings || []), ...(receipt?.trackingError ? [`自动进度未能保存：${receipt.trackingError}`] : [])],
+        status: 'queued' });
       results.queued++;
       if (entry.groupName === '未解析' && entry.conversationId) {
         await persistPromptRetryCheckpoint({ extensionVersion, createdAt: new Date().toISOString(),
@@ -529,9 +548,11 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
           throw new Error('Cannot replace the previous unresolved image because its Chrome download ID is missing');
         }
         const saved = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
-          'prompt.txt', folder, { kind: 'prompt', groupName: group.groupName, conflictAction: 'overwrite' }, ensureSameView);
+          'prompt.txt', folder, { kind: 'prompt', groupName: group.groupName, conflictAction: 'overwrite',
+            promptTracking: { page: plan.page, groupName: group.groupName } }, ensureSameView);
         item.promptDownloadId = saved.downloadId;
         item.promptSaveAttempts = saved.attempts;
+        if (saved.trackingError) item.warning = `自动进度未能保存：${saved.trackingError}`;
         results.imageDownloadsRequested++;
         const asset = await resolveOriginalForRecovery(client, entry, ensureSameView, wait =>
           panel.update({ stage: 'images', etaMs: null,
@@ -541,6 +562,7 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
         let replacementReceipt = null;
         item.imageDownloadId = await requestDownload(imageDataUrl, imageName, folder, {
           kind: 'relocate-image', conflictAction: 'overwrite', groupName: group.groupName, workerTimeoutMs: 90000,
+          tracking: { page: plan.page, sequence: entry.sequence, fileId: entry.fileId, savePrompts: true },
           ...(Number.isInteger(entry.sourceDownloadId) ? { replaceDownloadId: entry.sourceDownloadId } : {}),
           fallbackName: originalImages.filename(entry.fileId.slice(0, 64), asset.blob.type,
             entry.sequence - 1, imageNumbering.WIDTH),
@@ -548,6 +570,7 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
         });
         item.imageName = replacementReceipt?.filename || imageName;
         item.imageRelativePath = replacementReceipt?.relativePath || `${folder}/${group.groupName}/${item.imageName}`;
+        if (replacementReceipt?.trackingError) item.warning = `自动进度未能保存：${replacementReceipt.trackingError}`;
         item.sourceDownloadId = item.imageDownloadId;
         item.previousDownloadId = entry.sourceDownloadId;
         item.cleanupStatus = Number.isInteger(entry.sourceDownloadId)
@@ -587,7 +610,7 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
     finished: true, totalImages: count, resolvedImages: results.recovered,
     promptErrors: results.unresolved + results.saveFailed, etaMs: null,
     elapsedMs: Date.now() - startedAt,
-    message: `定向重试完成：${results.recovered} 个提示词文件已排队，${results.unresolved} 张仍未解析，${results.saveFailed} 个保存失败。未请求任何原图；详见 ${reportName}。` });
+    message: `定向重试完成：${results.recovered} 张已移入提示词分组，${results.unresolved} 张仍未解析，${results.saveFailed} 张保存失败；详见 ${reportName}。` });
 }
 
 function addBulkDownloadButton() {
@@ -655,7 +678,7 @@ function addBulkDownloadButton() {
       // Use the user-chosen folder for this run (overrides any default)
       const DOWNLOAD_FOLDER = chosenFolder;
       const concurrency = downloadQueue.normalizeConcurrency(selectedConcurrency);
-      const afterSequence = imageNumbering.parseBoundary(selectedAfterSequence);
+      let afterSequence = selectedBoundaryMode === 'auto' ? 0 : imageNumbering.parseBoundary(selectedAfterSequence);
       const savePrompts = selectedSavePrompts;
 
       floatingProgress?.destroy();
@@ -706,6 +729,7 @@ function addBulkDownloadButton() {
         extensionVersion,
         downloadConcurrency: concurrency,
         afterSequence,
+        boundaryMode: selectedBoundaryMode,
         savePrompts,
         scrapedAt: new Date().toISOString(),
         url: location.href,
@@ -780,18 +804,52 @@ function addBulkDownloadButton() {
       };
 
       let numbering;
+      let progressSummary = null;
+      let promptProgressAtStart = [];
       try {
         numbering = imageNumbering.plan(primaryList, originalImages, { after: afterSequence });
+        if (selectedBoundaryMode === 'auto') {
+          const progressResponse = await sendToWorker({ action: 'getDownloadProgress', page: startUrl,
+            folder: DOWNLOAD_FOLDER, savePrompts });
+          if (progressResponse.status !== 'found' || !Array.isArray(progressResponse.records)) {
+            throw new Error(`无法读取自动下载进度：${progressResponse.error || '状态不可用'}`);
+          }
+          if (progressResponse.records.some(record => record.status === 'in_progress' &&
+            numbering.all[record.sequence - 1]?.fileId === record.fileId)) {
+            throw new Error('之前的原图下载仍在进行；请等待 Chrome 下载完成后再继续。');
+          }
+          if (savePrompts && progressResponse.promptRecords?.some(record => record.status === 'in_progress')) {
+            throw new Error('之前的提示词文件下载仍在进行；请等待 Chrome 下载完成后再继续。');
+          }
+          afterSequence = imageNumbering.resumeBoundary(numbering.all, progressResponse.records, progressResponse.baseline);
+          numbering = imageNumbering.plan(primaryList, originalImages, { after: afterSequence });
+          progressSummary = { mode: 'auto', completedThrough: afterSequence,
+            tracked: progressResponse.records.length };
+          promptProgressAtStart = progressResponse.promptRecords || [];
+          meta.afterSequence = afterSequence;
+        } else if (afterSequence > 0) {
+          const baseline = numbering.all[afterSequence - 1];
+          try {
+            const saved = await sendToWorker({ action: 'setDownloadBaseline', page: startUrl,
+              folder: DOWNLOAD_FOLDER, savePrompts, sequence: afterSequence, fileId: baseline.fileId });
+            if (saved.status !== 'saved') meta.progressError = saved.error || 'Could not save manual boundary';
+          } catch (error) { meta.progressError = error.message; }
+        }
       } catch (error) {
-        meta.numbering = { rule: imageNumbering.RULE, scope, afterSequence, blocked: true,
-          error: error.message, issues: error.numberingIssues || [] };
+        const progressFailure = selectedBoundaryMode === 'auto' && Boolean(numbering);
+        meta.numbering = progressFailure ? { ...numbering.summary, scope } :
+          { rule: imageNumbering.RULE, scope, afterSequence, blocked: true,
+            error: error.message, issues: error.numberingIssues || [] };
+        if (progressFailure) meta.progress = { blocked: true, error: error.message };
         await exportMetadata();
         await exportJson({ schemaVersion: 4, extensionVersion, page: startUrl,
-          status: 'numbering-blocked', savePrompts, scope, afterSequence,
+          status: progressFailure ? 'progress-blocked' : 'numbering-blocked',
+          savePrompts, scope, afterSequence,
           promptRuleVersion: promptResolver?.RULE_VERSION || null,
           groupingRuleVersion: promptGroups?.RULE_VERSION || null,
           prompts: { savePrompts, status: savePrompts ? 'not-started' : 'disabled',
-            collectionErrors: [], saveErrors: [] }, numbering: meta.numbering, pagination,
+            collectionErrors: [], saveErrors: [] }, numbering: meta.numbering,
+          ...(progressFailure ? { progress: meta.progress } : {}), pagination,
           metadataExportError: meta.exportError || null,
           queued: 0, failed: 0, images: [] }, reportName);
         status(`未开始图片下载：${error.message}`, 'blocked');
@@ -828,7 +886,8 @@ function addBulkDownloadButton() {
         groupingRuleVersion: promptGroups?.RULE_VERSION || null,
         scope, afterSequence, status: savePrompts ? 'collecting' : 'disabled',
         conversationSource: savePrompts ? 'backend' : null,
-        groupCount: 0, selectedGroupCount: 0, collectionErrors: [], errorSummary: [], saveErrors: [], saves: []
+        groupCount: 0, selectedGroupCount: 0, collectionErrors: [], errorSummary: [],
+        saveErrors: [], progressErrors: [], saves: []
       };
       meta.prompts = promptExport;
       let grouping = null;
@@ -930,16 +989,28 @@ function addBulkDownloadButton() {
         // generated filename may overwrite; images continue to use uniquify.
         status('正在保存各组 prompt.txt…', 'prompt-save');
         panel.update({ stage: 'prompt-save' });
-        for (const group of grouping.selectedGroups) {
+        const selectedGroupNames = new Set(grouping.selectedGroups.map(group => group.groupName));
+        const completedPromptNames = new Set(promptProgressAtStart
+          .filter(record => record.status === 'complete').map(record => record.groupName));
+        const groupsToSave = selectedBoundaryMode === 'auto'
+          ? grouping.groups.filter(group => selectedGroupNames.has(group.groupName) ||
+            !completedPromptNames.has(group.groupName)) : grouping.selectedGroups;
+        promptExport.promptFilesToSave = groupsToSave.length;
+        for (const group of groupsToSave) {
           ensureSameView();
           const saved = { groupNumber: group.groupNumber, groupName: group.groupName,
             relativePath: `${DOWNLOAD_FOLDER}/${group.groupName}/prompt.txt`, status: 'failed' };
           try {
             const receipt = await requestPromptTextDownload('data:text/plain;charset=utf-8,' + encodeURIComponent(group.promptText),
-              'prompt.txt', DOWNLOAD_FOLDER, { groupName: group.groupName, kind: 'prompt', conflictAction: 'overwrite' }, ensureSameView);
+              'prompt.txt', DOWNLOAD_FOLDER, { groupName: group.groupName, kind: 'prompt', conflictAction: 'overwrite',
+                promptTracking: { page: startUrl, groupName: group.groupName } }, ensureSameView);
             saved.downloadId = receipt.downloadId;
             saved.attempts = receipt.attempts;
             saved.status = 'queued';
+            if (receipt.trackingError) {
+              saved.trackingError = receipt.trackingError;
+              promptExport.progressErrors.push({ groupName: group.groupName, error: receipt.trackingError });
+            }
           } catch (error) {
             saved.error = error.message;
             saved.attempts = error.saveAttempts || 3;
@@ -947,9 +1018,9 @@ function addBulkDownloadButton() {
           }
           promptExport.saves.push(saved);
           panel.update({ promptSaveErrors: promptExport.saveErrors.length,
-            message: `prompt.txt ${promptExport.saves.length}/${grouping.selectedGroupCount} 已处理` });
+            message: `prompt.txt ${promptExport.saves.length}/${groupsToSave.length} 已处理` });
         }
-        promptExport.saveStatus = promptExport.saveErrors.length ? 'partial' : grouping.selectedGroups.length ? 'queued' : 'not-needed';
+        promptExport.saveStatus = promptExport.saveErrors.length ? 'partial' : groupsToSave.length ? 'queued' : 'not-needed';
       }
       await exportMetadata();
       ensureSameView();
@@ -958,13 +1029,14 @@ function addBulkDownloadButton() {
         schemaVersion: 4, createdAt: new Date().toISOString(), page: startUrl,
         savePrompts, promptRuleVersion: promptExport.promptRuleVersion,
         groupingRuleVersion: promptExport.groupingRuleVersion, scope, afterSequence,
+        boundaryMode: selectedBoundaryMode, progressAtStart: progressSummary,
         groupCount: promptExport.groupCount, selectedGroupCount: promptExport.selectedGroupCount,
         prompts: promptExport,
         numbering: numberingSummary,
         qualityPolicy: 'Original endpoint or explicit original/download link; no preview fallback or re-encoding.',
         downloadStatusMeaning: 'queued means Chrome accepted the download; check browser Downloads for final completion.',
         metadataExportError: meta.exportError || null,
-        cacheError: meta.cacheError || null,
+        cacheError: meta.cacheError || null, progressError: meta.progressError || null,
         collectionIncomplete: false, pagination,
         discovered: numbering.all.length, selected: files.length, skipped: numbering.summary.skipped,
         queued: 0, failed: 0, warnings: 0, images: []
@@ -1074,6 +1146,7 @@ function addBulkDownloadButton() {
             ensureSameView();
             record.relativePath = `${DOWNLOAD_FOLDER}/${savePrompts ? entry.groupName + '/' : ''}${name}`;
             record.downloadId = await requestDownload(imageDataUrl, name, DOWNLOAD_FOLDER, {
+              tracking: { page: startUrl, sequence: entry.sequence, fileId: entry.fileId, savePrompts },
               ...(savePrompts ? { groupName: entry.unresolved ? undefined : entry.groupName, unresolved: entry.unresolved } : {}),
               fallbackName: originalImages.filename(entry.fileId.slice(0, 64), asset.blob.type, entry.sequence - 1, imageNumbering.WIDTH),
               onAccepted: receipt => {
@@ -1081,6 +1154,7 @@ function addBulkDownloadButton() {
                 record.name = receipt.filename || name;
                 record.relativePath = receipt.relativePath || `${DOWNLOAD_FOLDER}/${savePrompts ? entry.groupName + '/' : ''}${record.name}`;
                 if (receipt.filenameFallback) record.warnings.push('Chrome rejected the original filename; a safe ASCII filename was used.');
+                if (receipt.trackingError) record.warnings.push(`自动进度未能保存：${receipt.trackingError}`);
               }
             });
             record.status = 'queued';
@@ -1138,13 +1212,23 @@ function addBulkDownloadButton() {
         try { const indexed = await upsertCanonicalIndex(results, DOWNLOAD_FOLDER); results.canonicalIndex = indexed.result || indexed; }
         catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
       }
+      try {
+        const latest = await sendToWorker({ action: 'getDownloadProgress', page: startUrl,
+          folder: DOWNLOAD_FOLDER, savePrompts });
+        if (latest.status === 'found') {
+          results.progressAtFinish = { completedThrough: imageNumbering.resumeBoundary(numbering.all,
+            latest.records, latest.baseline), tracked: latest.records.length,
+            promptFilesCompleted: (latest.promptRecords || []).filter(record => record.status === 'complete').length };
+        }
+      } catch (error) { results.progressAtFinish = { error: error.message }; }
       await exportJson(results, reportName);
       btn.textContent = files.length
-        ? `${results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? '⚠️' : '✓'} ${results.queued} 张原图已排队，${results.failed} 张失败，${results.warnings} 张有警告。编号 ${files[0].sequence}–${files[files.length - 1].sequence}；跳过 ${results.skipped} 张。${savePrompts ? ` ${grouping.selectedGroupCount} 个提示词目录，${grouping.selectedUnresolvedCount} 张进入恢复区，${promptExport.saveErrors.length} 个 TXT 失败。` : ''}详见 download-results.json${meta.exportError ? '（元数据导出失败）' : ''}`
-        : `${meta.exportError ? '⚠️' : '✓'} 编号 ${afterSequence} 之后没有新图片；全库共 ${numbering.all.length} 张。${meta.exportError ? '元数据导出失败，请查看结果报告。' : '元数据和结果报告已排队。'}`;
+        ? `${results.failed || results.warnings || meta.exportError || meta.progressError || promptExport.saveErrors.length || promptExport.progressErrors.length ? '⚠️' : '✓'} ${results.queued} 张原图已排队，${results.failed} 张失败，${results.warnings} 张有警告。编号 ${files[0].sequence}–${files[files.length - 1].sequence}；跳过 ${results.skipped} 张。${savePrompts ? ` ${grouping.selectedGroupCount} 个提示词目录，${grouping.selectedUnresolvedCount} 张进入恢复区，${promptExport.saveErrors.length} 个 TXT 失败。` : ''}${meta.progressError || promptExport.progressErrors.length ? ' 自动进度记录有误，详见报告。' : ''}详见 download-results.json${meta.exportError ? '（元数据导出失败）' : ''}`
+        : `${meta.exportError || meta.progressError || promptExport.saveErrors.length || promptExport.progressErrors.length ? '⚠️' : '✓'} 编号 ${afterSequence} 之后没有新图片；全库共 ${numbering.all.length} 张。${savePrompts && promptExport.promptFilesToSave ? `已处理 ${promptExport.promptFilesToSave} 个提示词文件。` : ''}${meta.exportError || meta.progressError || promptExport.saveErrors.length || promptExport.progressErrors.length ? '请查看结果报告。' : '元数据和结果报告已排队。'}`;
       panel.update({ ...meter.snapshot(files.length), elapsedMs: Date.now() - panelStarted,
         completed: files.length, total: files.length, active: 0, finished: true,
-        phase: results.failed || results.warnings || meta.exportError || promptExport.saveErrors.length ? 'completed with issues' : 'complete',
+        phase: results.failed || results.warnings || meta.exportError || meta.progressError ||
+          promptExport.saveErrors.length || promptExport.progressErrors.length ? 'completed with issues' : 'complete',
         reason: files.length ? control.snapshot().reason : '没有新图片',
         queued: results.queued, failed: results.failed, warnings: results.warnings, retrying: 0,
         message: btn.textContent });
@@ -1340,7 +1424,9 @@ async function chooseDownloadLocation() {
             <section class="section">
               <div class="field-grid"><div><label for="bulk-dl-folder">下载子目录</label>
                 <input type="text" id="bulk-dl-folder" placeholder="chatgpt-images" autocomplete="off" spellcheck="false" /></div>
-                <div><label for="bulk-dl-after">编号之后</label><input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" /></div></div>
+                <div><label for="bulk-dl-boundary-mode">续传起点</label><select id="bulk-dl-boundary-mode"><option value="auto">自动识别</option><option value="manual">手动编号</option></select></div></div>
+              <div class="field" id="bulk-dl-after-row" hidden><label for="bulk-dl-after">编号之后</label><input type="number" id="bulk-dl-after" min="0" max="999999" step="1" value="0" /></div>
+              <p id="bulk-dl-progress" class="hint" role="status" aria-live="polite"></p>
               <div class="prompt-option"><button type="button" class="prompt-toggle" id="bulk-dl-prompts" aria-pressed="false"><span>同时恢复并整理提示词</span><span id="bulk-dl-prompts-state" aria-hidden="true">关闭</span></button>
               </div>
             </section>
@@ -1386,7 +1472,38 @@ async function chooseDownloadLocation() {
       modeInput.onchange = () => { manualRow.hidden = modeInput.value === 'auto'; };
       modeInput.onchange();
       const afterInput = root.querySelector('#bulk-dl-after');
-      afterInput.value = '0'; // Always explicit; never load a saved checkpoint.
+      const boundaryModeInput = root.querySelector('#bulk-dl-boundary-mode');
+      const afterRow = root.querySelector('#bulk-dl-after-row');
+      const progressText = root.querySelector('#bulk-dl-progress');
+      let progressRequest = 0;
+      const refreshProgress = async () => {
+        const current = ++progressRequest;
+        if (boundaryModeInput.value !== 'auto') { progressText.textContent = ''; return; }
+        progressText.textContent = '正在读取本地下载进度…';
+        try {
+          const response = await sendToWorker({ action: 'getDownloadProgress', page: location.href,
+            folder: input.value || 'chatgpt-images', savePrompts });
+          if (finished || current !== progressRequest) return;
+          if (response.status !== 'found') { progressText.textContent = '本地进度暂不可读取'; return; }
+          const records = new Map(response.records.map(record => [record.sequence, record]));
+          let through = Number.isSafeInteger(response.baseline?.sequence) ? response.baseline.sequence : 0;
+          while (records.get(through + 1)?.status === 'complete') through++;
+          progressText.textContent = through
+            ? `本地记录已完成至编号 ${through}；开始时将与图库核对。`
+            : '尚无已完成记录；将从编号 1 开始。';
+        } catch (_) {
+          if (!finished && current === progressRequest) progressText.textContent = '本地进度暂不可读取';
+        }
+      };
+      boundaryModeInput.value = 'auto';
+      afterInput.value = '0';
+      afterRow.hidden = true;
+      afterInput.disabled = true;
+      boundaryModeInput.onchange = () => {
+        afterRow.hidden = boundaryModeInput.value !== 'manual';
+        afterInput.disabled = afterRow.hidden;
+        void refreshProgress();
+      };
       const promptsButton = root.querySelector('#bulk-dl-prompts');
       const retryInput = root.querySelector('#bulk-dl-retry-report');
       const savedRetryButton = root.querySelector('#bulk-dl-retry-saved');
@@ -1396,7 +1513,8 @@ async function chooseDownloadLocation() {
       let manualImageRetryPlan = null;
       const setRetryControls = retryOnly => {
         root.querySelector('#bulk-dl-ok').textContent = retryOnly ? '开始恢复提示词' : '开始导出';
-        afterInput.disabled = retryOnly;
+        boundaryModeInput.disabled = retryOnly;
+        afterInput.disabled = retryOnly || boundaryModeInput.value !== 'manual';
         promptsButton.disabled = retryOnly;
         modeInput.disabled = retryOnly;
         parallelInput.disabled = retryOnly;
@@ -1432,6 +1550,7 @@ async function chooseDownloadLocation() {
         savePrompts = !savePrompts;
         promptsButton.setAttribute('aria-pressed', String(savePrompts));
         root.querySelector('#bulk-dl-prompts-state').textContent = savePrompts ? '开启' : '关闭';
+        void refreshProgress();
       };
       const showBtn = root.querySelector('#bulk-dl-show');
       const cancelBtn = root.querySelector('#bulk-dl-cancel');
@@ -1494,6 +1613,7 @@ async function chooseDownloadLocation() {
       sendToWorker({ action: 'getDownloadFolder' }).then(resp => {
         if (finished) return;
         if (!retryInput.files?.length && !useSavedRetry && !useSavedImageRetry) input.value = resp.folder || 'chatgpt-images';
+        void refreshProgress();
         const saved = downloadQueue.normalizeConcurrency(resp.concurrency);
         modeInput.value = saved === 'auto' ? 'auto' : 'manual';
         parallelInput.value = String(saved === 'auto' ? downloadQueue.DEFAULT_CONCURRENCY : saved);
@@ -1514,6 +1634,7 @@ async function chooseDownloadLocation() {
         try { await sendToWorker({ action: 'showDefaultDownloadsFolder' }); }
         catch (error) { errorText.textContent = error.message; }
       };
+      input.onchange = () => { void refreshProgress(); };
 
       const finish = (val) => {
         if (finished) return;
@@ -1537,7 +1658,8 @@ async function chooseDownloadLocation() {
             try { retryReport = JSON.parse(await retryFile.text()); }
             catch (_) { throw new Error('所选文件不是有效 JSON。'); }
           }
-          const after = retryReport || useSavedImageRetry ? 0 : imageNumbering.parseBoundary(afterInput.value);
+          const boundaryMode = retryReport || useSavedImageRetry ? 'manual' : boundaryModeInput.value;
+          const after = boundaryMode === 'manual' ? imageNumbering.parseBoundary(afterInput.value) : 0;
           const concurrency = modeInput.value === 'auto' ? 'auto' : Number(parallelInput.value);
           if (!retryReport && !useSavedImageRetry && concurrency !== 'auto' && (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > downloadQueue.MAX_CONCURRENCY)) {
             throw new Error('手动并发数量必须是 1–12 的整数。');
@@ -1558,6 +1680,7 @@ async function chooseDownloadLocation() {
           if (imageRetryPlan && resp.folder !== imageRetryPlan.folder) throw new Error('原图重试目录与检查点不匹配。');
           selectedConcurrency = downloadQueue.normalizeConcurrency(resp.concurrency ?? concurrency);
           selectedAfterSequence = after;
+          selectedBoundaryMode = boundaryMode;
           selectedSavePrompts = savePrompts;
           selectedRetryPlan = retryPlan;
           selectedImageRetryPlan = imageRetryPlan;

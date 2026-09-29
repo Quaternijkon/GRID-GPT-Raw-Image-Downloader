@@ -26,6 +26,13 @@ test('selects only unresolved exact image identities and conversations', () => {
   assert.equal(JSON.stringify(plan).includes('untrusted'), false);
 });
 
+test('legacy sibling recovery paths remain readable for a later exact placement retry', () => {
+  const legacy = report();
+  legacy.images[0].relativePath = 'chatgpt-images-1.9.10-recovery/未解析/000068-example.png';
+  const plan = retry.plan(legacy, 'chatgpt-images-1.9.10', legacy.page);
+  assert.equal(plan.entries[0].previousRelativePath, legacy.images[0].relativePath);
+});
+
 test('rejects mismatched page, directory and tampered unresolved paths', () => {
   assert.throws(() => retry.plan(report(), 'other-folder', 'https://chatgpt.com/images/'));
   assert.throws(() => retry.plan(report(), 'chatgpt-images-1.9.10', 'https://chatgpt.com/library/'));

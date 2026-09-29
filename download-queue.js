@@ -12,20 +12,23 @@
     return Number.isFinite(number) && number >= 1 ? Math.min(MAX_CONCURRENCY, Math.floor(number)) : DEFAULT_MODE;
   }
 
-  function createController({ concurrency = DEFAULT_MODE, now = () => Date.now(), memoryBudgetBytes = 384 * MiB } = {}) {
+  function createController({ concurrency = DEFAULT_MODE, now = () => Date.now(),
+    memoryBudgetBytes = 384 * MiB, initialConcurrency = 8, maxConcurrency = AUTO_MAX_CONCURRENCY } = {}) {
     const requested = normalizeConcurrency(concurrency);
     const auto = requested === 'auto';
     const started = now();
-    let target = auto ? 8 : requested, phase = auto ? 'probing' : 'manual', reason = 'Starting';
+    const autoCeiling = Math.max(1, Math.min(AUTO_MAX_CONCURRENCY, Math.floor(maxConcurrency) || AUTO_MAX_CONCURRENCY));
+    let target = auto ? Math.max(1, Math.min(autoCeiling, Math.floor(initialConcurrency) || 8)) : requested;
+    let phase = auto ? 'probing' : 'manual', reason = 'Starting';
     let pauseUntil = 0, lastDecrease = -Infinity, lastSample = started, lastProbe = started;
     let bytes = 0, good = 0, bad = 0, latencySum = 0, clean = 0;
     let headerLatency = 0, headerSamples = 0, taskBaseLatency = Infinity, lastGrowthFrom = null;
     let baseLatency = Infinity, previousRate = 0, noGain = 0, probing = auto;
-    let workingBytes = 8 * MiB, memoryLimit = AUTO_MAX_CONCURRENCY, rollback = null;
+    let workingBytes = 8 * MiB, memoryLimit = autoCeiling, rollback = null;
     let peakTarget = target, adjustments = 0;
     const history = [];
     const budget = Math.max(64 * MiB, Number(memoryBudgetBytes) || 384 * MiB);
-    const max = () => Math.max(1, Math.min(AUTO_MAX_CONCURRENCY, Math.floor(budget / workingBytes)));
+    const max = () => Math.max(1, Math.min(autoCeiling, Math.floor(budget / workingBytes)));
     memoryLimit = max();
     function change(next, why, nextPhase) {
       const old = target;
@@ -53,7 +56,7 @@
       const transient = errors.some(e => [408, 429, 500, 502, 503, 504].includes(e.status) ||
         (e.phase === 'fetch' && !e.status));
       if (transient || rejected) bad++;
-      if (value?.status === 'queued') {
+      if (value?.status === 'queued' || value?.status === 'complete') {
         good++; bytes += value.bytes || 0;
         if (!transient && value.retrievalAttempts <= 1) {
           latencySum += elapsedMs / Math.max(0.25, (value.bytes || 0) / MiB);
@@ -128,31 +131,49 @@
   }
 
   async function run(items, task, { concurrency = DEFAULT_MODE, onProgress = () => {}, controller,
-    now = () => Date.now(), tickMs = 500 } = {}) {
+    now = () => Date.now(), tickMs = 500, estimateBytes, memoryBudgetBytes,
+    checkActive = () => {} } = {}) {
     const control = controller || createController({ concurrency, now });
     const results = new Array(items.length);
+    const hasMemoryGate = typeof estimateBytes === 'function' && Number.isFinite(memoryBudgetBytes) && memoryBudgetBytes > 0;
     let next = 0, active = 0, completed = 0, peakActive = 0, progressEnabled = true;
+    let activeBytes = 0, peakActiveBytes = 0, abortError = null;
     return new Promise(resolve => {
       let timer, done = false;
       function notify(state) {
         if (!progressEnabled) return;
         try { onProgress({ total: items.length, started: next, completed, active,
-          pending: items.length - next, peakActive, ...state }); }
+          pending: items.length - next, peakActive, activeBytes, peakActiveBytes, ...state }); }
         catch (error) { progressEnabled = false; console.warn('[BulkDL] Progress callback failed:', error); }
       }
       function pump() {
         if (done) return;
+        if (!abortError) {
+          try { checkActive(); }
+          catch (error) {
+            abortError = error;
+            for (let index = next; index < items.length; index++) results[index] = { status: 'rejected', reason: error };
+            completed += items.length - next;
+            next = items.length;
+          }
+        }
         const state = control.sample({ active, pending: items.length - next });
-        while (!state.coolingDown && active < state.concurrency && next < items.length) {
+        while (!abortError && !state.coolingDown && active < state.concurrency && next < items.length) {
+          const estimate = hasMemoryGate ? Number(estimateBytes(items[next])) : 0;
+          const cost = hasMemoryGate ? Number.isFinite(estimate) && estimate > 0
+            ? Math.min(memoryBudgetBytes, estimate) : memoryBudgetBytes : 0;
+          if (hasMemoryGate && active > 0 && activeBytes + cost > memoryBudgetBytes) break;
           const index = next++, began = now();
-          active++; peakActive = Math.max(peakActive, active);
+          active++; activeBytes += cost;
+          peakActive = Math.max(peakActive, active);
+          peakActiveBytes = Math.max(peakActiveBytes, activeBytes);
           Promise.resolve().then(() => task(items[index], index)).then(
             value => { results[index] = { status: 'fulfilled', value }; },
             reason => { results[index] = { status: 'rejected', reason }; }
           ).then(() => {
             const outcome = results[index];
             control.observe(outcome.value, now() - began, outcome.status === 'rejected');
-            active--; completed++;
+            active--; activeBytes -= cost; completed++;
             pump();
           });
         }

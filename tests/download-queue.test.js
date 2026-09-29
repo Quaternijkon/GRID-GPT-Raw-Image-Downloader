@@ -72,3 +72,42 @@ test('a failing progress renderer cannot abandon pending image tasks', async () 
   });
   assert.deepEqual(results.map(r => r.value), [1, 2, 3]);
 });
+
+test('planned byte budget admits small media beside a video without exceeding the cap', async () => {
+  const gates = Array.from({ length: 3 }, deferred);
+  const started = [];
+  let peakBytes = 0;
+  const work = queue.run([80, 80, 10], async (cost, index) => {
+    started.push(index);
+    await gates[index].promise;
+    return { status: 'complete', bytes: cost * 1048576, retrievalAttempts: 1 };
+  }, { concurrency: 3, memoryBudgetBytes: 100, estimateBytes: cost => cost,
+    onProgress: update => { peakBytes = Math.max(peakBytes, update.peakActiveBytes); } });
+  await tick();
+  assert.deepEqual(started, [0]);
+  gates[0].resolve();
+  await tick();
+  assert.deepEqual(started, [0, 1, 2]);
+  gates[1].resolve(); gates[2].resolve();
+  await work;
+  assert.ok(peakBytes <= 100);
+});
+
+test('route cancellation prevents new media admissions while draining active work', async () => {
+  const gates = Array.from({ length: 4 }, deferred);
+  const started = [];
+  let active = true;
+  const work = queue.run([0, 1, 2, 3], async index => {
+    started.push(index);
+    await gates[index].promise;
+    return index;
+  }, { concurrency: 2, checkActive: () => { if (!active) throw new Error('Page changed'); } });
+  await tick();
+  assert.deepEqual(started, [0, 1]);
+  active = false;
+  gates[0].resolve(); gates[1].resolve();
+  const outcomes = await work;
+  assert.deepEqual(started, [0, 1]);
+  assert.deepEqual(outcomes.map(outcome => outcome.status),
+    ['fulfilled', 'fulfilled', 'rejected', 'rejected']);
+});

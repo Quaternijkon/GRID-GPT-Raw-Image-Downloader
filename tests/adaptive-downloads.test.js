@@ -59,6 +59,18 @@ test('manual limits remain fixed while server cooldown still applies', () => {
   assert.equal(c.snapshot().coolingDown, false);
 });
 
+test('completed Grok downloads provide successful samples for Auto growth', () => {
+  let time = 0;
+  const c = queue.createController({ now: () => time, initialConcurrency: 4,
+    maxConcurrency: 16, memoryBudgetBytes: 512 * MiB });
+  assert.equal(c.snapshot().concurrency, 4);
+  for (let index = 0; index < 4; index++) c.observe({ ...good, status: 'complete' }, 800);
+  time = 4000;
+  c.sample({ active: 4, pending: 100 });
+  assert.ok(c.snapshot().concurrency > 4);
+  assert.ok(c.snapshot().concurrency <= 16);
+});
+
 test('rate meter uses recent response bytes and suppresses ETA when completions stall', () => {
   let time = 0;
   const meter = progress.createMeter({ now: () => time });
