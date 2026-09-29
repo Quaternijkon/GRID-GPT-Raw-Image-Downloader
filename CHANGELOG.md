@@ -1,5 +1,11 @@
 # Changelog
 
+## 3.0.5 — 2026-09-30
+
+- Replace the decorative progress sparkline with a time-based 60-second throughput chart and compact metrics. Show a bounded item-completion forecast, concurrency history, and a mutually exclusive processed/active/pending distribution.
+- Clearly label provider-specific byte accounting and Chrome queue acceptance. Suppress forecasts during cooldowns, stalls, and insufficient samples. Download admission, fetching, and disk-write behavior are unchanged.
+
+
 ## 3.0.4 — 2026-09-29
 
 - Align Grok and Gemini export settings and progress with the full ChatGPT dashboard, including prompt-stage counts, response-byte speed, ETA, concurrency telemetry, queue and error counts, and collapsible display.
