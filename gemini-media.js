@@ -99,7 +99,7 @@
     const variant = typeof item[10] === 'string' && item[10].length >= 16 && item[10].length <= 4096
       ? item[10] : `${item[1][0]}:${item[1][1]}`;
     const identityKey = `${item[5]}\n${item[0][0]}\n${item[0][1]}\n${variant}`;
-    return { id: item[5], chatId: item[0][0], responseId: item[0][1], url, time,
+    return { id: item[5], resourceId: item[5], chatId: item[0][0], responseId: item[0][1], url, time,
       identityKey, variantFingerprint: variantHash(identityKey) };
   }
   async function collect(fetchImpl, { token, checkActive = () => {}, onProgress = () => {}, delay } = {}) {
@@ -143,41 +143,103 @@
       .map((entry, index) => ({ ...entry, sequence: index + 1 }));
     return { entries, token: auth, pagination: { complete: true, pages, records: total, images: entries.length } };
   }
+  function containsResource(value, resourceId) {
+    const pending = [value];
+    for (let inspected = 0; pending.length && inspected < 10000; inspected++) {
+      const current = pending.pop();
+      if (current === resourceId) return true;
+      if (Array.isArray(current)) for (const item of current) {
+        if (pending.length >= 10000) break;
+        pending.push(item);
+      }
+    }
+    return false;
+  }
   async function resolvePrompts(fetchImpl, entries, { token, checkActive = () => {}, onProgress = () => {}, delay } = {}) {
     const chats = [...new Set(entries.map(entry => entry.chatId))];
-    const byResponse = new Map(), failures = [];
-    for (let index = 0; index < chats.length; index++) {
-      checkActive();
-      const chatId = chats[index];
-      try {
-        let cursor = null;
-        const cursors = new Set();
-        for (let page = 1; page <= 20; page++) {
-          const data = await rpc(fetchImpl, 'hNvQHb', [chatId, 100, cursor, 1, [1], [4], null, 1],
-            { token, checkActive, delay, onRetry: retry => onProgress({ processed: index,
-              total: chats.length, resolved: byResponse.size, retry }) });
-          if (!Array.isArray(data?.[0]) || data[1] != null && typeof data[1] !== 'string')
-            throw new Error('Gemini 会话消息格式变化');
-          for (const turn of data[0]) {
-            const responseId = turn?.[1]?.[1];
-            const prompt = turn?.[2]?.[0]?.[0];
-            if (RESPONSE_ID.test(responseId) && typeof prompt === 'string' && prompt.trim())
-              byResponse.set(`${chatId}:${responseId}`, prompt.trim().replace(/\r\n?/g, '\n'));
-          }
-          if (!data[1]) break;
-          if (!data[0].length || cursors.has(data[1]) || page === 20)
-            throw new Error('Gemini 会话分页未完整结束');
-          cursors.add(data[1]); cursor = data[1];
-        }
-      } catch (error) { failures.push({ chatId, error: error.message }); }
-      onProgress({ processed: index + 1, total: chats.length, resolved: byResponse.size });
-    }
-    let unresolved = 0;
+    const targets = new Map();
     for (const entry of entries) {
-      entry.prompt = byResponse.get(`${entry.chatId}:${entry.responseId}`) || null;
-      if (!entry.prompt) { entry.promptError = { code: 'prompt_missing', message: 'No exact prompt matched this image response' }; unresolved++; }
+      if (!targets.has(entry.chatId)) targets.set(entry.chatId, new Map());
+      if (!targets.get(entry.chatId).has(entry.responseId)) targets.get(entry.chatId).set(entry.responseId, []);
+      targets.get(entry.chatId).get(entry.responseId).push(entry);
     }
-    return { chats: chats.length, resolved: entries.length - unresolved, unresolved, failures };
+    const assistantPrompts = new Map(), requestPrompts = new Map(), failedChats = new Map();
+    const wait = delay || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+    const readChats = async (chatIds, round) => {
+      for (let index = 0; index < chatIds.length; index++) {
+        checkActive();
+        const chatId = chatIds[index];
+        try {
+          let cursor = null;
+          const cursors = new Set();
+          for (let page = 1; page <= 20; page++) {
+            const data = await rpc(fetchImpl, 'hNvQHb', [chatId, 100, cursor, 1, [1], [4], null, 1],
+              { token, checkActive, delay, onRetry: retry => onProgress({ phase: 'request-retry', round,
+                processed: index, total: chatIds.length, retry }) });
+            if (!Array.isArray(data?.[0]) || data[1] != null && typeof data[1] !== 'string')
+              throw new Error('Gemini 会话消息格式变化');
+            for (const turn of data[0]) {
+              const prompt = turn?.[2]?.[0]?.[0];
+              if (typeof prompt !== 'string' || !prompt.trim()) continue;
+              const text = prompt.trim().replace(/\r\n?/g, '\n');
+              const assistantId = turn?.[1]?.[1];
+              if (RESPONSE_ID.test(assistantId) && targets.get(chatId)?.has(assistantId))
+                assistantPrompts.set(`${chatId}:${assistantId}`, text);
+              const requestId = turn?.[0]?.[1];
+              if (!RESPONSE_ID.test(requestId)) continue;
+              for (const entry of targets.get(chatId)?.get(requestId) || []) {
+                const resourceId = entry.resourceId || entry.id?.slice(0, 19);
+                if (MEDIA_ID.test(resourceId) &&
+                    (turn?.[3]?.[3] === resourceId || containsResource(turn?.[3], resourceId)))
+                  requestPrompts.set(`${chatId}:${requestId}:${resourceId}`, text);
+              }
+            }
+            if (!data[1]) break;
+            if (!data[0].length || cursors.has(data[1]) || page === 20)
+              throw new Error('Gemini 会话分页未完整结束');
+            cursors.add(data[1]); cursor = data[1];
+          }
+          failedChats.delete(chatId);
+        } catch (error) { failedChats.set(chatId, error.message); }
+        onProgress({ phase: round ? 'recovery' : 'collecting', round,
+          processed: index + 1, total: chatIds.length });
+      }
+    };
+    const assign = () => {
+      let unresolved = 0;
+      for (const entry of entries) {
+        const resourceId = entry.resourceId || entry.id?.slice(0, 19);
+        const assistant = assistantPrompts.get(`${entry.chatId}:${entry.responseId}`);
+        const request = requestPrompts.get(`${entry.chatId}:${entry.responseId}:${resourceId}`);
+        entry.prompt = assistant || request || null;
+        entry.promptSource = assistant ? 'conversation.assistant-response' :
+          request ? 'conversation.request-response-with-exact-media' : null;
+        if (entry.prompt) delete entry.promptError;
+        else {
+          entry.promptError = { code: failedChats.has(entry.chatId) ? 'conversation_unavailable' : 'target_not_found',
+            message: failedChats.get(entry.chatId) || 'No exact prompt and media association was available' };
+          unresolved++;
+        }
+      }
+      return unresolved;
+    };
+    await readChats(chats, 0);
+    const initialUnresolved = assign();
+    let unresolved = initialUnresolved, recoveryRounds = 0;
+    for (let round = 1; round <= 2 && unresolved; round++) {
+      checkActive();
+      const pendingChats = [...new Set(entries.filter(entry => !entry.prompt).map(entry => entry.chatId))];
+      const waitMs = round === 1 ? 2000 : 5000;
+      onProgress({ phase: 'recovery-wait', round, processed: 0, total: pendingChats.length,
+        unresolved, waitMs });
+      await wait(waitMs);
+      await readChats(pendingChats, round);
+      unresolved = assign();
+      recoveryRounds = round;
+    }
+    return { chats: chats.length, resolved: entries.length - unresolved, unresolved,
+      initialUnresolved, recovered: initialUnresolved - unresolved, recoveryRounds,
+      failures: [...failedChats].map(([chatId, error]) => ({ chatId, error })) };
   }
   const api = { ORIGIN, FILTER, supported, imageUrl, tokenFromDocument, parseRpc, rpc, parseEntry, collect, resolvePrompts };
   globalThis.GRIDGeminiMedia = api;

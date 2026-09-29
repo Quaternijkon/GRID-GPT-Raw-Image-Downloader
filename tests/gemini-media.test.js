@@ -41,6 +41,68 @@ test('Gemini prompt extraction matches the exact response in its own conversatio
   assert.deepEqual([entry.prompt, other.prompt], ['First prompt', 'Second prompt']);
 });
 
+test('Gemini recovers a request-linked image only when its exact media ID is in that turn', async () => {
+  const entry = gemini.parseEntry(image('a'.repeat(16), '1'.repeat(16), 'f'.repeat(16), 200));
+  const response = [[
+    [[entry.chatId, entry.responseId], [entry.chatId, `r_${'2'.repeat(16)}`],
+      [['Exact image request']], [null, null, null, entry.resourceId]]
+  ], null, null, []];
+  const result = await gemini.resolvePrompts(async () => ({ ok: true,
+    text: async () => wrap('hNvQHb', response) }), [entry], { token: 'test-token' });
+  assert.equal(result.unresolved, 0);
+  assert.equal(entry.prompt, 'Exact image request');
+  assert.equal(entry.promptSource, 'conversation.request-response-with-exact-media');
+});
+
+test('Gemini prefers the assistant turn when the same response ID is reused as a later request parent', async () => {
+  const entry = gemini.parseEntry(image('a'.repeat(16), '1'.repeat(16), 'f'.repeat(16), 200));
+  const response = [[
+    [[entry.chatId, `r_${'0'.repeat(16)}`], [entry.chatId, entry.responseId],
+      [['Original image request']], [null, null, null, entry.resourceId]],
+    [[entry.chatId, entry.responseId], [entry.chatId, `r_${'2'.repeat(16)}`],
+      [['Later edit request']], [null, null, null, entry.resourceId]]
+  ], null, null, []];
+  await gemini.resolvePrompts(async () => ({ ok: true,
+    text: async () => wrap('hNvQHb', response) }), [entry], { token: 'test-token' });
+  assert.equal(entry.prompt, 'Original image request');
+  assert.equal(entry.promptSource, 'conversation.assistant-response');
+});
+
+test('Gemini automatically rereads only unresolved conversations before final placement', async () => {
+  const entry = gemini.parseEntry(image('a'.repeat(16), '1'.repeat(16), 'f'.repeat(16), 200));
+  let calls = 0;
+  const waits = [];
+  const result = await gemini.resolvePrompts(async () => {
+    calls++;
+    return { ok: true, text: async () => wrap('hNvQHb', [calls === 1 ? [] : [
+      [[entry.chatId, entry.responseId], [entry.chatId, `r_${'2'.repeat(16)}`],
+        [['Prompt available after synchronization']], [entry.resourceId]]
+    ], null, null, []]) };
+  }, [entry], { token: 'test-token', delay: async ms => { waits.push(ms); } });
+  assert.equal(calls, 2);
+  assert.deepEqual(waits, [2000]);
+  assert.equal(result.initialUnresolved, 1);
+  assert.equal(result.recovered, 1);
+  assert.equal(result.unresolved, 0);
+  assert.equal(entry.promptError, undefined);
+});
+
+test('Gemini keeps a request ID unresolved when the target media is absent', async () => {
+  const entry = gemini.parseEntry(image('a'.repeat(16), '1'.repeat(16), 'f'.repeat(16), 200));
+  let calls = 0;
+  const result = await gemini.resolvePrompts(async () => {
+    calls++;
+    return { ok: true, text: async () => wrap('hNvQHb', [[
+      [[entry.chatId, entry.responseId], [entry.chatId, `r_${'2'.repeat(16)}`],
+        [['Prompt for another image']], [null, null, null, `rc_${'e'.repeat(16)}`]]
+    ], null, null, []]) };
+  }, [entry], { token: 'test-token', delay: async () => {} });
+  assert.equal(calls, 3);
+  assert.equal(result.unresolved, 1);
+  assert.equal(entry.prompt, null);
+  assert.equal(entry.promptError.code, 'target_not_found');
+});
+
 test('Gemini rejects external media hosts and incomplete pagination', async () => {
   assert.equal(gemini.supported('/images'), false);
   assert.equal(gemini.imageUrl('https://evil.example/gg/' + 'A'.repeat(50)), null);

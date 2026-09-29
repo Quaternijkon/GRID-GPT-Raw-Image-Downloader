@@ -99,6 +99,66 @@ test('Gemini rejects an external redirect before any credentialed media request'
   assert.deepEqual(calls, [{ url: `${base}=d-I?alr=yes`, credentials: 'omit' }]);
 });
 
+test('Gemini cleanup is idempotent when a prior attempt already removed the unresolved file', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
+  const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;
+  const mediaId = `rc_${'f'.repeat(16)}`;
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const oldRelativePath = `gemini-images/未解析/000001-${mediaId}.png`;
+  const newRelativePath = `gemini-images/${groupName}/000001-${mediaId}.png`;
+  const removed = [];
+  const states = new Map([
+    [90, { id: 90, state: 'complete', exists: false, filename: `/Downloads/${oldRelativePath}` }],
+    [91, { id: 91, state: 'complete', exists: true, filename: `/Downloads/${newRelativePath}` }]
+  ]);
+  const send = worker({ downloadId: 91, removed, downloadStates: states,
+    fetchImpl: async url => ({ ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'image/png' : null },
+      arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) }) });
+  const page = 'https://gemini.google.com/library';
+  const download = await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images',
+    sequence: 1, mediaId, savePrompts: true, groupName, url: base, retry: true,
+    previousRecovery: { downloadId: 90, relativePath: oldRelativePath } }, page);
+  assert.equal(download.relativePath, newRelativePath);
+  const cleanup = await send({ action: 'cleanupGeminiRecovery', folder: 'gemini-images',
+    mediaId, oldDownloadId: 90, oldRelativePath, newDownloadId: 91 }, page);
+  assert.equal(cleanup.cleanupStatus, 'old-file-already-absent');
+  assert.deepEqual(removed, []);
+  const progress = await send({ action: 'getGeminiProgress', folder: 'gemini-images', savePrompts: true }, page);
+  assert.equal(progress.records[0].previousRecovery, undefined);
+});
+
+test('Gemini keeps the unresolved original until its grouped replacement is complete', async () => {
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
+  const mediaId = `rc_${'f'.repeat(16)}`;
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const oldRelativePath = `gemini-images/未解析/000001-${mediaId}.png`;
+  const newRelativePath = `gemini-images/${groupName}/000001-${mediaId}.png`;
+  const states = new Map([
+    [90, { id: 90, state: 'complete', exists: true, filename: `/Downloads/${oldRelativePath}` }],
+    [91, { id: 91, state: 'in_progress', exists: false, filename: `/Downloads/${newRelativePath}` }]
+  ]);
+  const removed = [];
+  const send = worker({ downloadId: 91, removed, downloadStates: states,
+    fetchImpl: async url => ({ ok: true, status: 200, url,
+      headers: { get: key => key === 'content-type' ? 'image/png' : null },
+      arrayBuffer: async () => png.buffer.slice(png.byteOffset, png.byteOffset + png.byteLength) }) });
+  const page = 'https://gemini.google.com/library';
+  await send({ action: 'geminiDownload', kind: 'media', folder: 'gemini-images', sequence: 1,
+    mediaId, savePrompts: true, groupName,
+    url: `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`, retry: true,
+    previousRecovery: { downloadId: 90, relativePath: oldRelativePath } }, page);
+  const cleanup = { action: 'cleanupGeminiRecovery', folder: 'gemini-images', mediaId,
+    oldDownloadId: 90, oldRelativePath, newDownloadId: 91 };
+  assert.equal((await send(cleanup, page)).ok, false);
+  assert.deepEqual(removed, []);
+  states.set(91, { id: 91, state: 'complete', exists: true, filename: `/Downloads/${newRelativePath}` });
+  assert.equal((await send(cleanup, page)).cleanupStatus, 'old-file-removed');
+  assert.deepEqual(removed, [90]);
+  const progress = await send({ action: 'getGeminiProgress', folder: 'gemini-images', savePrompts: true }, page);
+  assert.equal(progress.records[0].previousRecovery, undefined);
+});
+
 test('Grok downloads are isolated to Grok Imagine and validate media, prompt, and report paths', async () => {
   const calls = [];
   const send = worker({ downloadHook: (options, callback) => { calls.push(options); callback(calls.length); } });

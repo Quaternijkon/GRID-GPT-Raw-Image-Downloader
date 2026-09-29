@@ -1,5 +1,10 @@
 # Changelog
 
+## 3.0.3 — 2026-09-29
+
+- Resolve Gemini image prompts by checking the exact media identity within the corresponding conversation turn, including request-linked image records as well as assistant response IDs. Assistant response matches take precedence where the same ID also appears as a later request parent. Reread only still-unresolved conversations in two bounded recovery rounds before choosing output paths.
+- Preserve a completed prompt group across temporary resolver misses. A retry places the original in its final content-addressed group, verifies Chrome completion and removes the old `未解析` file. Interrupted cleanup is replayed on the next run, including the case where the old file was already removed. Progress and reports state the unresolved count explicitly.
+
 ## 3.0.2 — 2026-09-29
 
 - Fixed every Gemini original download failing with HTTP 403. The first `/gg/` descriptor is readable anonymously, but the validated `/rd-gg/` media hop requires the browser's Google media credentials. Credentials are now sent only to allowlisted Gemini media hosts at that hop; byte signature, size and SHA-256 checks remain in place before Chrome receives the exact image bytes.

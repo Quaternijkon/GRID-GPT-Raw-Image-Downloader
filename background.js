@@ -369,16 +369,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const oldItems = await chromeCall((query, cb) => chrome.downloads.search(query, cb), { id: msg.oldDownloadId });
           const newItems = await chromeCall((query, cb) => chrome.downloads.search(query, cb), { id: msg.newDownloadId });
           if (newItems?.[0]?.state !== 'complete' || newItems[0].exists !== true ||
-              oldItems?.[0]?.state !== 'complete' || oldItems[0].exists !== true ||
-              typeof oldItems[0].filename !== 'string' || typeof newItems[0].filename !== 'string' ||
-              !downloadPathMatches(oldItems[0].filename, msg.oldRelativePath) ||
+              typeof newItems[0].filename !== 'string' ||
               !downloadPathMatches(newItems[0].filename, saved.relativePath)) throw new Error('Gemini cleanup files are incomplete');
-          await chromeCall((id, cb) => chrome.downloads.removeFile(id, cb), msg.oldDownloadId);
-          chrome.downloads.erase({ id: msg.oldDownloadId }, () => { void chrome.runtime.lastError; });
+          const old = oldItems?.[0];
+          let cleanupStatus = 'old-file-already-absent';
+          if (old?.state === 'complete' && old.exists === true) {
+            if (typeof old.filename !== 'string' || !downloadPathMatches(old.filename, msg.oldRelativePath))
+              throw new Error('Old Gemini recovery download has moved');
+            await chromeCall((id, cb) => chrome.downloads.removeFile(id, cb), msg.oldDownloadId);
+            chrome.downloads.erase({ id: msg.oldDownloadId }, () => { void chrome.runtime.lastError; });
+            cleanupStatus = 'old-file-removed';
+          } else if (old?.state === 'in_progress' || old?.exists !== false && old !== undefined)
+            throw new Error('Old Gemini recovery download is not ready for cleanup');
           delete saved.previousRecovery;
           await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
             { [`${geminiPrefix(folder, true)}media:${msg.mediaId}`]: saved });
-          return { status: 'cleaned', cleanupStatus: 'old-file-removed' };
+          return { status: 'cleaned', cleanupStatus };
         }
         throw new Error('Unsupported Gemini action');
       })().then(sendResponse, error => sendResponse({ ok: false, status: 'error', error: error.message }));

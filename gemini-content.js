@@ -127,7 +127,11 @@
       token: found.token, checkActive,
       onProgress: progress => status(progress.retry
         ? `Gemini 会话暂时不可用，自动等待恢复（第 ${progress.retry.attempt}/${progress.retry.maxAttempts} 次）…`
-        : `正在提取提示词 ${progress.processed}/${progress.total} 个会话…`)
+        : progress.phase === 'recovery-wait'
+          ? `仍有 ${progress.unresolved} 张提示词未解析，${Math.round(progress.waitMs / 1000)} 秒后自动复核相关会话…`
+          : progress.phase === 'recovery'
+            ? `正在复核未解析提示词 ${progress.processed}/${progress.total} 个会话…`
+            : `正在提取提示词 ${progress.processed}/${progress.total} 个会话…`)
     }) : null;
     let progress;
     try { progress = await worker({ action: 'getGeminiProgress', folder: options.folder, savePrompts: options.prompts }); }
@@ -139,6 +143,14 @@
       if (!options.prompts) continue;
       entry.groupName = entry.prompt ? groups.groupIdentity(entry.prompt).groupName : '未解析';
       if (entry.prompt) promptGroups.set(entry.groupName, entry.prompt);
+      else {
+        const prior = byId.get(entry.id);
+        const priorGroup = prior?.relativePath?.split('/')[1];
+        // A temporary resolver miss must not move an already grouped original
+        // back into 未解析, or repeated runs would regress the file layout.
+        if (prior?.status === 'complete' && /^p-[0-9a-f]{32}-[0-9a-f]+$/.test(priorGroup))
+          entry.groupName = priorGroup;
+      }
     }
     const expectedRoot = entry => options.prompts ? `${options.folder}/${entry.groupName}/` : `${options.folder}/`;
     const matches = (entry, record) => record?.status === 'complete' && record.mediaId === entry.id &&
@@ -156,18 +168,31 @@
     if (options.mode === 'auto' && progress.records.some(record => record.status === 'in_progress'))
       throw new Error('先前的 Gemini 下载仍在进行，请等待 Chrome 下载完成后重试。');
     if (options.after > found.entries.length) throw new Error(`手动编号 ${options.after} 超出当前 ${found.entries.length} 张图片。`);
+    const recoveryCleanup = [];
+    if (options.prompts) for (const entry of found.entries) {
+      const prior = byId.get(entry.id);
+      if (!prior?.previousRecovery || !matches(entry, prior) || entry.groupName === '未解析') continue;
+      try {
+        const cleanup = await worker({ action: 'cleanupGeminiRecovery', folder: options.folder,
+          mediaId: entry.id, oldDownloadId: prior.previousRecovery.downloadId,
+          oldRelativePath: prior.previousRecovery.relativePath, newDownloadId: prior.downloadId });
+        recoveryCleanup.push({ mediaId: entry.id, status: cleanup.cleanupStatus });
+      } catch (error) { recoveryCleanup.push({ mediaId: entry.id, status: 'failed', error: error.message }); }
+    }
     const selected = found.entries.filter(entry => options.retryIds ? options.retryIds.includes(entry.id) :
       entry.sequence > options.after && (options.mode !== 'auto' || !complete.has(entry.id)));
     const report = { schemaVersion: 1, kind: 'gemini-download-results',
       extensionVersion: chrome.runtime.getManifest().version, page: startUrl, createdAt: new Date().toISOString(),
       folder: options.folder, boundaryMode: options.mode, afterSequence: options.after,
       savePrompts: options.prompts, pagination: found.pagination, promptCollection,
+      unresolvedPrompts: promptCollection?.unresolved || 0,
+      recoveredPrompts: promptCollection?.recovered || 0,
       discovered: found.entries.length, selected: selected.length, skipped: found.entries.length - selected.length,
       progressAtStart: { completedThrough: through(progress.records), completedImages: complete.size },
       queued: 0, completed: 0, failed: 0, pending: 0, promptFilesQueued: 0, promptFilesFailed: 0,
       qualityPolicy: 'Full size Gemini image; exact validated response bytes, no preview substitution or re-encoding.',
       downloadStatusMeaning: 'queued means Chrome accepted the download; completed means Chrome reported completion and the file exists.',
-      images: [], promptFiles: [], recoveryCleanup: [] };
+      images: [], promptFiles: [], recoveryCleanup };
     status(`已发现 ${found.entries.length} 张图片，本次处理 ${selected.length} 张。`,
       { total: selected.length, processed: 0, completed: 0, failed: 0 });
     if (options.prompts) {
@@ -201,9 +226,13 @@
         ...(options.prompts ? { groupName: entry.groupName, ...(entry.prompt ? {} : { promptError: entry.promptError }) } : {}),
         status: 'failed', warnings: [] };
       const prior = byId.get(entry.id);
-      const previous = options.prompts && prior?.status === 'complete' &&
-        prior.relativePath?.startsWith(`${options.folder}/未解析/${String(entry.sequence).padStart(6, '0')}-${entry.id}.`) &&
-        entry.groupName !== '未解析' ? { downloadId: prior.downloadId, relativePath: prior.relativePath } : null;
+      const recoveryPrefix = `${options.folder}/未解析/${String(entry.sequence).padStart(6, '0')}-${entry.id}.`;
+      const candidate = prior?.previousRecovery || (prior?.status === 'complete' &&
+        prior.relativePath?.startsWith(recoveryPrefix)
+        ? { downloadId: prior.downloadId, relativePath: prior.relativePath } : null);
+      const previous = options.prompts && entry.groupName !== '未解析' &&
+        Number.isInteger(candidate?.downloadId) && candidate?.relativePath?.startsWith(recoveryPrefix) &&
+        /^(?:png|jpg|webp|gif|avif)$/.test(candidate.relativePath.slice(recoveryPrefix.length)) ? candidate : null;
       try {
         const accepted = await worker({ action: 'geminiDownload', kind: 'media', folder: options.folder,
           sequence: entry.sequence, mediaId: entry.id, url: entry.url, savePrompts: options.prompts,
@@ -247,9 +276,12 @@
     report.completed = report.images.filter(item => item.status === 'complete').length;
     report.failed = report.images.filter(item => item.status === 'failed').length;
     report.pending = report.images.filter(item => item.status === 'queued').length;
+    report.layoutIssues = report.images.filter(item => item.cleanupStatus === 'failed').length +
+      report.recoveryCleanup.filter(item => item.status === 'failed').length;
     report.status = report.failed || report.pending || report.promptFilesFailed ||
       report.promptFiles.some(item => item.status !== 'complete') ||
-      report.images.some(item => item.cleanupStatus === 'failed') || options.prompts && promptCollection?.unresolved ? 'partial' : 'complete';
+      report.layoutIssues ||
+      options.prompts && promptCollection?.unresolved ? 'partial' : 'complete';
     report.downloadPerformance = { mode: controller.snapshot().mode, requestedConcurrency: concurrency,
       finalConcurrency: controller.snapshot().concurrency, peakActive: controller.snapshot().peakTarget,
       elapsedMs: Date.now() - startedAt, receivedBytes, adaptive: controller.summary() };
@@ -279,7 +311,13 @@
           button.style.display = 'none';
           panel = ui.progress('Gemini', () => { button.style.display = ''; button.textContent = '⬇️ 导出 Gemini 图片'; });
           const report = await run(options, (message, progress) => panel.update(message, progress));
-          panel.update(`${report.status === 'partial' ? '⚠️' : '✓'} ${report.completed}/${report.selected} 张图片已完成，${report.failed} 张失败；详见结果报告`,
+          const details = [
+            report.recoveredPrompts ? `${report.recoveredPrompts} 张提示词自动恢复` : null,
+            report.unresolvedPrompts ? `${report.unresolvedPrompts} 张提示词仍未解析` : null,
+            report.promptFilesFailed ? `${report.promptFilesFailed} 个提示词文件失败` : null,
+            report.layoutIssues ? `${report.layoutIssues} 个旧文件待清理` : null
+          ].filter(Boolean);
+          panel.update(`${report.status === 'partial' ? '⚠️' : '✓'} 本次 ${report.completed}/${report.selected} 张图片已完成，${report.failed} 张失败${details.length ? `，${details.join('，')}` : ''}；详见结果报告`,
             { total: report.selected, processed: report.selected, completed: report.completed, failed: report.failed });
         } catch (error) {
           const message = errorMessage(error);
