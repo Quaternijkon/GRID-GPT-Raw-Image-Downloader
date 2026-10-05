@@ -1,0 +1,14 @@
+{
+  "kind": "grid-media-index",
+  "schemaVersion": 1,
+  "provider": "chatgpt",
+  "scope": "generated-images",
+  "media": [
+    {"id": "file_synthetic_before", "relativePath": "0001/000001.png", "createdAtNs": "1767225600000000000", "width": 1024, "height": 1536, "mimeType": "image/png", "promptSnapshotId": "synthetic-conversation:output-before", "status": "complete"},
+    {"id": "file_synthetic_after", "relativePath": "0002/000002.png", "createdAtNs": "1767225660000000000", "promptSnapshotId": "synthetic-conversation:output-after", "inputAtNs": "1767225650000000000", "status": "queued"}
+  ],
+  "snapshots": [
+    {"id": "synthetic-conversation:output-before", "conversationId": "synthetic-conversation", "taskRootMessageId": "input-before", "outputNodeId": "output-before", "basePrompt": "A blue mountain", "text": "A blue mountain", "sourceMessageIds": ["input-before"], "branchPath": ["root", "input-before", "output-before"]},
+    {"id": "synthetic-conversation:output-after", "conversationId": "synthetic-conversation", "taskRootMessageId": "input-before", "outputNodeId": "output-after", "parentSnapshotId": "synthetic-conversation:output-before", "basePrompt": "A blue mountain", "text": "A blue mountain\n\nAdd snow", "editSteps": [{"messageId": "edit-after", "text": "Add snow", "createdAtNs": "1767225650000000000"}], "sourceMessageIds": ["input-before", "edit-after"], "branchPath": ["root", "input-before", "output-before", "edit-after", "output-after"]}
+  ]
+}

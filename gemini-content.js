@@ -365,6 +365,21 @@
       total: selected.length, processed: selected.length, queued: report.queued, failed: report.failed,
       warnings: report.warnings, bytes: receivedBytes,
       promptErrors: promptCollection?.unresolved || 0, promptSaveErrors: report.promptFilesFailed });
+    try {
+      const currentIds = new Set(report.images.map(item => item.mediaId));
+      const records = [...progress.records.filter(item => item.kind === 'media' && !currentIds.has(item.mediaId)), ...report.images];
+      const index = globalThis.GRIDMediaIndex.build({ provider: 'gemini', scope: 'library', folder: options.folder,
+        records, entries: found.entries, savePrompts: options.prompts });
+      report.auxiliaryIndex = await worker({ action: 'saveGridMediaIndex', folder: options.folder,
+        savePrompts: options.prompts, index, placements: records.filter(item => Number.isInteger(item.downloadId))
+          .map(item => ({ id: item.mediaId, downloadId: item.downloadId })) });
+      if (!report.auxiliaryIndex.ok || report.auxiliaryIndex.status !== 'complete' ||
+          report.auxiliaryIndex.cacheError || report.auxiliaryIndex.durableError)
+        throw new Error(report.auxiliaryIndex.error || report.auxiliaryIndex.completionError ||
+          report.auxiliaryIndex.cacheError || report.auxiliaryIndex.durableError || '辅助索引尚未确认写入磁盘。');
+    } catch (error) {
+      report.auxiliaryIndexError = error.message; report.warnings++; report.status = 'partial';
+    }
     await worker({ action: 'geminiDownload', kind: 'report', folder: options.folder,
       name: 'gemini-download-results.json', url: dataUrl('application/json', JSON.stringify(report, null, 2)) });
     return report;

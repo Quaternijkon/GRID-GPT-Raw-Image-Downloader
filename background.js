@@ -7,6 +7,8 @@
 
 importScripts('original-images.js');
 importScripts('download-queue.js');
+importScripts('media-index.js');
+importScripts('media-index-store.js');
 const sanitizeSegment = globalThis.ChatGPTOriginalImages.sanitizeSegment;
 const normalizeConcurrency = globalThis.ChatGPTDownloadQueue.normalizeConcurrency;
 const GROK_ID = /^[A-Za-z0-9_-]{8,128}$/;
@@ -129,6 +131,127 @@ const chromeCall = (fn, arg) => new Promise((resolve, reject) => fn(arg, result 
   const error = chrome.runtime.lastError;
   if (error) reject(new Error(error.message)); else resolve(result);
 }));
+
+let mediaIndexWriteTail = Promise.resolve();
+async function previousMediaIndex(relativePath, savePrompts) {
+  const index = globalThis.GRIDMediaIndex;
+  const history = await chromeCall((query, callback) => chrome.downloads.search(query, callback),
+    { filenameRegex: 'grid-media-index\\.json$', limit: 0 });
+  const matches = (history || []).filter(item => typeof item.filename === 'string' &&
+    item.filename.replace(/\\/g, '/').endsWith(`/${relativePath}`));
+  if (matches.some(item => item.state === 'in_progress')) throw new Error('A previous GRID index download is still in progress');
+  const existing = matches.filter(item => item.exists !== false).sort((a, b) => (b.id || 0) - (a.id || 0));
+  if (!existing.length) return { exists: false };
+  const latest = existing[0];
+  if (latest.state !== 'complete' || latest.exists !== true) return { exists: true, downloadId: latest.id };
+  const prefix = 'data:application/json;charset=utf-8,';
+  if (typeof latest.url !== 'string' || !latest.url.startsWith(prefix) || latest.url.length > 32 * 1048576)
+    return { exists: true, downloadId: latest.id };
+  try {
+    return { exists: true, downloadId: latest.id,
+      document: index.sanitize(JSON.parse(decodeURIComponent(latest.url.slice(prefix.length))), savePrompts) };
+  } catch (_) { return { exists: true, downloadId: latest.id }; }
+}
+
+async function saveMediaIndex(message) {
+  const index = globalThis.GRIDMediaIndex;
+  const folder = message.folder;
+  if (typeof folder !== 'string' || sanitizeSegment(folder, 'exports') !== folder ||
+      typeof message.savePrompts !== 'boolean') throw new Error('Invalid GRID media index folder');
+  const document = index.sanitize(message.index, message.savePrompts);
+  if ([...document.media, ...document.snapshots].some(item =>
+    item.provider !== document.provider || item.scope !== document.scope)) throw new Error('Invalid incoming index namespace');
+  const placements = message.placements;
+  if (placements !== undefined && (!Array.isArray(placements) || placements.length > 20000 || placements.some(item =>
+    typeof item?.id !== 'string' || !Number.isInteger(item.downloadId) || item.downloadId < 0)))
+    throw new Error('Invalid GRID index placements');
+  const byId = new Map(document.media.map(item => [item.id, item]));
+  for (let offset = 0; offset < (placements || []).length; offset += 8) {
+    await Promise.all(placements.slice(offset, offset + 8).map(async placement => {
+      const record = byId.get(placement.id);
+      if (!record) return;
+      try {
+        const items = await chromeCall((query, callback) => chrome.downloads.search(query, callback), { id: placement.downloadId });
+        const item = items?.[0];
+        if (item?.state === 'complete' && item.exists === true && typeof item.filename === 'string') {
+          const actual = item.filename.replace(/\\/g, '/');
+          const offset = actual.lastIndexOf(`/${folder}/`);
+          const path = offset >= 0 ? index.relativePath(actual.slice(offset + 1), folder) : undefined;
+          if (path) { record.relativePath = path; record.status = 'complete'; }
+        } else if (item?.state === 'interrupted' || item?.state === 'complete' && item.exists === false) record.status = 'failed';
+      } catch (_) { /* Missing state remains queued, never invent completion. */ }
+    }));
+  }
+  const relativePath = `${folder}/${index.FILE_NAME}`;
+  const storageKey = 'gridGlryMediaIndexes';
+  const store = globalThis.GRIDMediaIndexStore;
+  let previous, cache = {}, cacheError, durableError, durableRecord;
+  const [local, durable] = await Promise.allSettled([
+    chromeCall((keys, callback) => chrome.storage.local.get(keys, callback), [storageKey]), store.read(folder)
+  ]);
+  if (local.status === 'fulfilled') cache = local.value?.[storageKey] || {};
+  else cacheError = local.reason.message;
+  if (durable.status === 'fulfilled' && durable.value) {
+    try {
+      durableRecord = { ...durable.value, document: index.sanitize(durable.value.document, message.savePrompts) };
+    } catch (error) { durableError = `Invalid durable index: ${error.message}`; }
+  } else if (durable.status === 'rejected') durableError = durable.reason.message;
+  // History is independently checked: a cache miss or a corrupt/failed durable read cannot authorize destructive replacement.
+  const historical = await previousMediaIndex(relativePath, message.savePrompts);
+  if (historical.exists && !historical.document &&
+      (!durableRecord?.publishedExact || durableRecord.publishedDownloadId !== historical.downloadId))
+    throw new Error('Existing GRID index has no recoverable merge base; export stopped to preserve its history');
+  if (historical.document) previous = historical.document;
+  if (durableRecord) previous = index.merge(previous, durableRecord.document, message.savePrompts);
+  if (!previous && cache[folder]?.document) {
+    try { previous = index.sanitize(cache[folder].document, message.savePrompts); }
+    catch (error) { cacheError = `Invalid acceleration cache: ${error.message}`; }
+  }
+  // An invalid/oversized merged base fails before download; never replace it with the partial incoming document.
+  const merged = index.merge(previous, document, message.savePrompts);
+  const canOverwrite = !!historical.document || historical.exists && durableRecord?.publishedExact === true &&
+    durableRecord.publishedDownloadId === historical.downloadId;
+  const durableNext = { document: merged, publishedExact: canOverwrite,
+    publishedDownloadId: historical.document ? historical.downloadId : durableRecord?.publishedDownloadId };
+  try { await store.write(folder, durableNext); durableError = undefined; }
+  catch (error) { durableError = error.message; }
+  const downloadId = await chromeCall((options, callback) => chrome.downloads.download(options, callback), {
+    url: `data:application/json;charset=utf-8,${encodeURIComponent(JSON.stringify(merged))}`,
+    // With cleared browser history, an unknown on-disk index must survive the first write.
+    filename: relativePath, conflictAction: canOverwrite ? 'overwrite' : 'uniquify'
+  });
+  if (!Number.isInteger(downloadId) || downloadId < 0) throw new Error('Chrome rejected GRID media index');
+  const bounded = index.boundedCache(cache, folder, merged);
+  try {
+    await chromeCall((data, callback) => chrome.storage.local.set(data, callback), { [storageKey]: bounded.cache });
+  } catch (error) { cacheError = error.message; }
+  // Accepted is distinct from disk completion. Content scripts do not call chrome.downloads.
+  const started = Date.now();
+  let status = 'queued', completionError;
+  while (Date.now() - started < 30000) {
+    try {
+      const downloads = await chromeCall((query, callback) => chrome.downloads.search(query, callback), { id: downloadId });
+      const item = downloads?.[0];
+      if (item?.state === 'complete') {
+        if (item.exists === true && typeof item.filename === 'string' &&
+            item.filename.replace(/\\/g, '/').endsWith(`/${relativePath}`)) status = 'complete';
+        else completionError = 'Chrome completion did not confirm the requested index file';
+        break;
+      }
+      if (!item || item.state === 'interrupted') { status = 'failed'; completionError = item?.error || 'Index download disappeared'; break; }
+    } catch (error) { completionError = error.message; break; }
+    await new Promise(resolve => setTimeout(resolve, 250));
+  }
+  if (status === 'complete') {
+    try { await store.write(folder, { ...durableNext, publishedExact: true, publishedDownloadId: downloadId }); durableError = undefined; }
+    catch (error) { durableError = error.message; }
+  }
+  return { ok: status !== 'failed', status, downloadId, relativePath,
+    media: merged.media.length, snapshots: merged.snapshots.length,
+    cacheRetained: bounded.currentRetained,
+    ...(cacheError ? { cacheError } : {}), ...(durableError ? { durableError } : {}),
+    ...(completionError ? { completionError } : {}) };
+}
 
 function checkpointPage(value) {
   try {
@@ -269,6 +392,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return false;
   }
   try {
+    if (msg.action === 'saveGridMediaIndex') {
+      const provider = chatgptSender ? 'chatgpt' : grokScope ? 'grok' : 'gemini';
+      if (msg.index?.provider !== provider || grokScope && msg.index.scope !== grokScope ||
+          geminiPage && msg.index.scope !== 'library') {
+        sendResponse({ ok: false, error: 'Invalid GRID media index provider or scope' }); return false;
+      }
+      const work = mediaIndexWriteTail.then(() => saveMediaIndex(msg));
+      mediaIndexWriteTail = work.catch(() => {});
+      work.then(sendResponse, error => sendResponse({ ok: false, status: 'failed', error: error.message }));
+      return true;
+    }
     if (msg.action === 'getMediaRetryCheckpoint' || msg.action === 'saveMediaRetryCheckpoint') {
       const context = mediaRetryContext(msg.provider, grokScope, geminiPage);
       if (!context) { sendResponse({ status: 'invalid', error: 'Invalid media retry provider' }); return false; }

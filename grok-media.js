@@ -63,6 +63,7 @@
               post.originalPost?.originalPrompt, parent?.prompt, parent?.originalPrompt]
               .find(value => typeof value === 'string' && value.trim());
             const entry = { id: String(id), kind, createdAt: new Date(time).toISOString(), time,
+              generationTimeSource: post.createTime ?? post.createdAt ?? parent?.createTime ?? parent?.createdAt,
               sourceConversationId: post.sourceConversationId || post.conversationId ||
                 parent?.sourceConversationId || parent?.conversationId || null,
               sourceResponseId: post.responseId || parent?.responseId || null,

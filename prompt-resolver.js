@@ -230,12 +230,15 @@
     let edits = [];
     let sources = [];
     let nonImageAttachmentCount = 0;
+    let inputCreatedAt, parentOutputNodeId;
     let userTextMessages = 0, referenceInputs = 0, outputMessages = 0;
     for (const id of path.slice(taskStart)) {
       const current = event(mapping[id]);
       if (current.kind === 'image') {
         referenceInputs++;
         root = current.id;
+        inputCreatedAt = mapping[id].message.create_time;
+        parentOutputNodeId = undefined;
         taskKind = 'reference-image';
         hasOutput = false;
         references = current.images;
@@ -248,6 +251,8 @@
         userTextMessages++;
         if (state === 'NO_TASK' || (taskKind === 'text-only' && state === 'WAIT_OUTPUT' && !hasOutput)) {
           root = current.id;
+          inputCreatedAt = mapping[id].message.create_time;
+          parentOutputNodeId = undefined;
           taskKind = 'text-only';
           base = current.text;
           references = [];
@@ -257,11 +262,15 @@
           state = 'WAIT_OUTPUT';
         } else if (state === 'WAIT_BASE_TEXT') {
           base = current.text;
+          inputCreatedAt = mapping[id].message.create_time;
           nonImageAttachmentCount += current.nonImageAttachments.length;
           sources.push(current.id);
           state = 'WAIT_OUTPUT';
         } else if (state === 'OUTPUT_READY') {
-          edits.push({ messageId: current.id, text: current.text });
+          const createdAt = mapping[id].message.create_time;
+          inputCreatedAt = createdAt;
+          edits.push({ messageId: current.id, text: current.text,
+            ...(createdAt !== undefined && createdAt !== null ? { createdAt } : {}) });
           nonImageAttachmentCount += current.nonImageAttachments.length;
           sources.push(current.id);
           state = 'WAIT_OUTPUT';
@@ -282,10 +291,13 @@
             taskKind, taskRootMessageId: root, referenceImages: references.map(image => image.identitySupported
               ? { assetPointer: image.assetPointer, fileId: image.fileId } : { unsupportedIdentity: true }),
             nonImageAttachmentCount, editSteps: edits.map(edit => ({ ...edit })),
+            outputNodeId: target.nodeId,
+            ...(parentOutputNodeId ? { parentOutputNodeId } : {}),
+            ...(inputCreatedAt !== undefined && inputCreatedAt !== null ? { inputCreatedAt } : {}),
             sourceMessageIds: [...sources], outputMessageId: current.id,
             outputAssetId: target.assetPointer, branchPath: [...path] };
         }
-        if (root) { hasOutput = true; state = 'OUTPUT_READY'; }
+        if (root) { hasOutput = true; state = 'OUTPUT_READY'; parentOutputNodeId = id; }
       }
     }
     fail('target_replay_failed', 'Target output was not reached on its verified ancestry.');
