@@ -5,16 +5,20 @@ const vm = require('node:vm');
 const webcrypto = require('node:crypto').webcrypto;
 
 function worker({ storageError = false, downloadId = 1, downloadHook, fetchImpl,
-  downloadStates = new Map(), downloadHistory = [], removed = [], erased = [] } = {}) {
+  downloadStates = new Map(), downloadHistory = [], removed = [], erased = [], durableStore,
+  settings = {}, historyError = false } = {}) {
   let listener;
-  const settings = {};
   const chrome = {
     runtime: { onMessage: { addListener(fn) { listener = fn; } }, onInstalled: { addListener() {} } },
     downloads: { download(opts, callback) {
       if (downloadHook) downloadHook(opts, callback, chrome);
       else callback(downloadId);
-    }, search(query, callback) { callback(query.id === undefined ? downloadHistory :
-      [downloadStates.get(query.id) || { id: query.id, state: 'complete' }]); },
+    }, search(query, callback) {
+      if (historyError && query.id === undefined) chrome.runtime.lastError = { message: 'History unavailable' };
+      callback(query.id === undefined ? downloadHistory :
+        [downloadStates.get(query.id) || { id: query.id, state: 'complete' }]);
+      delete chrome.runtime.lastError;
+    },
     cancel(_id, callback) { callback(); }, removeFile(id, callback) { removed.push(id); callback(); },
     erase(query, callback) { erased.push(query.id); callback([{ id: query.id }]); } },
     storage: { local: {
@@ -32,9 +36,223 @@ function worker({ storageError = false, downloadId = 1, downloadHook, fetchImpl,
     crypto: webcrypto, btoa, fetch: fetchImpl });
   context.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), context);
+  if (durableStore) context.GRIDMediaIndexStore = durableStore;
   return (message, senderUrl = 'https://chatgpt.com/images') =>
     new Promise(resolve => listener(message, { url: senderUrl }, resolve));
 }
+
+test('GLRY auxiliary index observes final unique image filename and separately acknowledges disk completion', async () => {
+  const downloads = [];
+  const states = new Map([[4, { id: 4, state: 'complete', exists: true,
+    filename: '/Downloads/my-export/0001/image (1).png' }], [5, { id: 5, state: 'complete', exists: true,
+    filename: '/Downloads/my-export/.glry/grid-media-index.json' }]]);
+  const send = worker({ downloadStates: states, downloadHook: (options, callback) => { downloads.push(options); callback(5); } });
+  const document = { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+    media: [{ id: 'file_synthetic', relativePath: '0001/image.png', status: 'queued', createdAtNs: '1767225600000000000' }] };
+  const result = await send({ action: 'saveGridMediaIndex', folder: 'my-export', savePrompts: false,
+    index: document, placements: [{ id: 'file_synthetic', downloadId: 4 }] });
+  assert.equal(result.status, 'complete');
+  assert.equal(downloads[0].filename, 'my-export/.glry/grid-media-index.json');
+  assert.equal(downloads[0].conflictAction, 'uniquify');
+  const stored = JSON.parse(decodeURIComponent(downloads[0].url.split(',').slice(1).join(',')));
+  assert.equal(stored.media[0].relativePath, '0001/image (1).png');
+  assert.equal(stored.media[0].status, 'complete');
+  assert.equal(JSON.stringify(stored).includes('/Downloads'), false);
+  const retried = { ...document, media: [{ id: 'file_synthetic', relativePath: '0001/image.png', status: 'failed' }] };
+  await send({ action: 'saveGridMediaIndex', folder: 'my-export', savePrompts: false, index: retried });
+  const merged = JSON.parse(decodeURIComponent(downloads[1].url.split(',').slice(1).join(',')));
+  assert.equal(merged.media[0].relativePath, '0001/image (1).png');
+  assert.equal(merged.media[0].createdAtNs, '1767225600000000000');
+});
+
+test('GLRY auxiliary downloads reject traversal and provider spoofing and report interrupted disk writes', async () => {
+  const downloads = [];
+  const send = worker({ downloadStates: new Map([[6, { id: 6, state: 'interrupted', error: 'FILE_ACCESS_DENIED' }]]),
+    downloadHook: (options, callback) => { downloads.push(options); callback(6); } });
+  const document = { kind: 'grid-media-index', schemaVersion: 1, provider: 'grok', scope: 'owned',
+    media: [{ id: 'asset_000001', relativePath: 'image.png', status: 'queued' }] };
+  assert.equal((await send({ action: 'saveGridMediaIndex', folder: 'export', savePrompts: false,
+    index: document })).ok, false);
+  assert.equal((await send({ action: 'saveGridMediaIndex', folder: '../escape', savePrompts: false,
+    index: document }, 'https://grok.com/imagine')).ok, false);
+  assert.equal((await send({ action: 'saveGridMediaIndex', folder: 'export', savePrompts: false,
+    index: { ...document, media: [{ ...document.media[0], relativePath: '.glry/head.json' }] } },
+    'https://grok.com/imagine')).ok, false);
+  assert.equal(downloads.length, 0);
+  const result = await send({ action: 'saveGridMediaIndex', folder: 'export', savePrompts: false,
+    index: document }, 'https://grok.com/imagine');
+  assert.equal(result.ok, false);
+  assert.equal(result.status, 'failed');
+  assert.equal(result.completionError, 'FILE_ACCESS_DENIED');
+  assert.equal(downloads.length, 1);
+});
+
+test('an accepted image still in progress remains queued even before its destination exists', async () => {
+  const downloads = [];
+  const send = worker({ downloadStates: new Map([
+    [3, { id: 3, state: 'in_progress', exists: false, filename: '/Downloads/export/image.png' }],
+    [4, { id: 4, state: 'complete', exists: true, filename: '/Downloads/export/.glry/grid-media-index.json' }]
+  ]), downloadHook: (options, callback) => { downloads.push(options); callback(4); } });
+  const result = await send({ action: 'saveGridMediaIndex', folder: 'export', savePrompts: false,
+    index: { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+      media: [{ id: 'file_synthetic', relativePath: 'image.png', status: 'queued' }] },
+    placements: [{ id: 'file_synthetic', downloadId: 3 }] });
+  assert.equal(result.status, 'complete');
+  const stored = JSON.parse(decodeURIComponent(downloads[0].url.split(',').slice(1).join(',')));
+  assert.equal(stored.media[0].status, 'queued');
+});
+
+const largePortableIndex = () => ({ kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+  media: Array.from({ length: 24 }, (_, i) => ({ id: `file_large_${i}`, relativePath: `${i}/image.png`,
+    createdAtNs: '1767225600000000000', promptSnapshotId: `snapshot-${i}`, status: 'complete' })),
+  snapshots: Array.from({ length: 24 }, (_, i) => ({ id: `snapshot-${i}`, text: 'x'.repeat(199000) })) });
+const memoryDurableStore = () => {
+  const roots = new Map();
+  return { roots, read: async folder => roots.get(folder), write: async (folder, record) => { roots.set(folder, record); } };
+};
+const indexDownloadFixture = ({ durableStore, settings = {}, storageError = false, historyError = false } = {}) => {
+  const downloads = [], history = [], states = new Map();
+  const send = worker({ durableStore, settings, storageError, historyError, downloadHistory: history,
+    downloadStates: states, downloadHook: (options, callback) => {
+      downloads.push(options);
+      const id = downloads.length;
+      const item = { id, state: 'complete', exists: true, filename: `/Downloads/${options.filename}`, url: options.url };
+      history.push(item); states.set(id, item); callback(id);
+    } });
+  const save = (document, folder = 'durable-export', providerPage = 'https://chatgpt.com/images') =>
+    send({ action: 'saveGridMediaIndex', folder, savePrompts: true, index: document }, providerPage);
+  const lastDocument = () => JSON.parse(decodeURIComponent(downloads.at(-1).url.split(',').slice(1).join(',')));
+  return { save, downloads, history, states, lastDocument, settings };
+};
+
+test('a 4.8 MiB index survives a partial retry after the 2 MiB acceleration cache skips it', async () => {
+  const durable = memoryDurableStore();
+  const fixture = indexDownloadFixture({ durableStore: durable });
+  const large = largePortableIndex();
+  const first = await fixture.save(large);
+  assert.equal(first.status, 'complete');
+  assert.equal(first.cacheRetained, false);
+  assert.equal(durable.roots.get('durable-export').document.media.length, 24);
+  const retry = { ...large, media: [{ id: 'file_large_0', relativePath: '0/image.png', width: 1024, status: 'complete' }], snapshots: [] };
+  assert.equal((await fixture.save(retry)).status, 'complete');
+  const merged = fixture.lastDocument();
+  assert.equal(merged.media.length, 24);
+  assert.equal(merged.snapshots.length, 24);
+  assert.equal(merged.media[0].createdAtNs, '1767225600000000000');
+  assert.equal(merged.media[0].width, 1024);
+  assert.equal(fixture.downloads[1].conflictAction, 'overwrite');
+  const anotherProvider = { kind: 'grid-media-index', schemaVersion: 1, provider: 'grok', scope: 'owned',
+    media: [{ id: 'file_large_0', relativePath: 'grok.png', status: 'complete' }] };
+  await fixture.save(anotherProvider, 'durable-export', 'https://grok.com/imagine');
+  assert.equal(fixture.lastDocument().media.length, 25);
+  assert.equal(fixture.lastDocument().snapshots.length, 24);
+});
+
+test('Chrome completed data-URL history recovers the full large merge base if durable I/O fails', async () => {
+  const failed = { read: async () => { throw new Error('Durable read unavailable'); },
+    write: async () => { throw new Error('Durable write unavailable'); } };
+  const fixture = indexDownloadFixture({ durableStore: failed, storageError: true });
+  const large = largePortableIndex();
+  const first = await fixture.save(large);
+  assert.equal(first.status, 'complete');
+  assert.equal(first.cacheRetained, false);
+  assert.match(first.durableError, /Durable write/);
+  const retry = { ...large, media: [{ id: 'file_large_0', relativePath: '0/image.png', status: 'queued' }], snapshots: [] };
+  assert.equal((await fixture.save(retry)).status, 'complete');
+  assert.equal(fixture.lastDocument().media.length, 24);
+  assert.equal(fixture.lastDocument().snapshots.length, 24);
+});
+
+test('evicting the ninth hot-cache root does not evict its durable merge base', async () => {
+  const durable = memoryDurableStore();
+  const fixture = indexDownloadFixture({ durableStore: durable });
+  const document = { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+    media: [{ id: 'file_first', relativePath: 'first.png', status: 'complete', createdAtNs: '1767225600000000000' }] };
+  for (let i = 0; i < 10; i++) await fixture.save(document, `export-${i}`);
+  assert.equal(Object.hasOwn(fixture.settings.gridGlryMediaIndexes, 'export-0'), false);
+  assert.equal(durable.roots.size, 10);
+  fixture.history.length = 0;
+  await fixture.save({ ...document, media: [{ id: 'file_second', relativePath: 'second.png', status: 'complete' }] }, 'export-0');
+  assert.equal(fixture.lastDocument().media.length, 2);
+  assert.equal(fixture.downloads.at(-1).conflictAction, 'uniquify');
+});
+
+test('opaque history is recoverable only when its current download ID matches the durable publication', async () => {
+  const durable = memoryDurableStore();
+  const fixture = indexDownloadFixture({ durableStore: durable });
+  const document = { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+    media: [{ id: 'file_prior', relativePath: 'prior.png', status: 'complete' }] };
+  await fixture.save(document);
+  fixture.history[0].url = 'blob:opaque';
+  assert.equal((await fixture.save({ ...document, media: [{ id: 'file_new', relativePath: 'new.png', status: 'complete' }] })).status, 'complete');
+  assert.equal(fixture.lastDocument().media.length, 2);
+  fixture.history.push({ id: 99, state: 'complete', exists: true,
+    filename: '/Downloads/durable-export/.glry/grid-media-index.json', url: 'blob:another-exporter' });
+  const refused = await fixture.save(document);
+  assert.equal(refused.ok, false);
+  assert.equal(fixture.downloads.length, 2);
+});
+
+test('an unrecoverable existing index or failed history lookup stops before any replacement download', async () => {
+  const prior = { id: 80, state: 'complete', exists: true,
+    filename: '/Downloads/durable-export/.glry/grid-media-index.json', url: 'blob:unrecoverable' };
+  const downloads = [];
+  const send = worker({ downloadHistory: [prior], durableStore: { read: async () => { throw new Error('Read failed'); },
+    write: async () => { throw new Error('Write failed'); } },
+    downloadHook: (options, callback) => { downloads.push(options); callback(81); } });
+  const document = { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+    media: [{ id: 'file_partial', relativePath: 'partial.png', status: 'complete' }] };
+  const result = await send({ action: 'saveGridMediaIndex', folder: 'durable-export', savePrompts: true, index: document });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /no recoverable merge base/);
+  assert.equal(downloads.length, 0);
+  const unavailable = indexDownloadFixture({ durableStore: memoryDurableStore(), historyError: true });
+  assert.equal((await unavailable.save(document)).ok, false);
+  assert.equal(unavailable.downloads.length, 0);
+});
+
+test('an oversized combined namespace is refused without replacing the last complete index', async () => {
+  const fixture = indexDownloadFixture({ durableStore: memoryDurableStore() });
+  const large = largePortableIndex();
+  await fixture.save(large);
+  const another = { ...large, provider: 'grok', scope: 'owned' };
+  const result = await fixture.save(another, 'durable-export', 'https://grok.com/imagine');
+  assert.equal(result.ok, false);
+  assert.match(result.error, /8 MiB/);
+  assert.equal(fixture.downloads.length, 1);
+});
+
+test('concurrent partial updates serialize and retain every provider namespace', async () => {
+  const fixture = indexDownloadFixture({ durableStore: memoryDurableStore() });
+  const request = (provider, scope, id) => ({ kind: 'grid-media-index', schemaVersion: 1, provider, scope,
+    media: [{ id, relativePath: `${provider}-${id}.png`, status: 'complete' }] });
+  await Promise.all([
+    fixture.save(request('chatgpt', 'generated-images', 'file_one')),
+    fixture.save(request('chatgpt', 'generated-images', 'file_two')),
+    fixture.save(request('grok', 'owned', 'asset_one'), 'durable-export', 'https://grok.com/imagine')
+  ]);
+  assert.equal(fixture.lastDocument().media.length, 3);
+  assert.deepEqual(fixture.lastDocument().media.map(item => item.id), ['file_one', 'file_two', 'asset_one']);
+});
+
+test('cleared history uses uniquify and cannot publish an index collision as a completed replacement', async () => {
+  const durable = memoryDurableStore();
+  durable.roots.set('export', { publishedExact: true, publishedDownloadId: 1,
+    document: { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+      media: [{ id: 'file_prior', relativePath: 'prior.png', status: 'complete' }] } });
+  const downloads = [];
+  const send = worker({ durableStore: durable, downloadStates: new Map([[2, { id: 2, state: 'complete', exists: true,
+    filename: '/Downloads/export/.glry/grid-media-index (1).json' }]]),
+    downloadHook: (options, callback) => { downloads.push(options); callback(2); } });
+  const result = await send({ action: 'saveGridMediaIndex', folder: 'export', savePrompts: true,
+    index: { kind: 'grid-media-index', schemaVersion: 1, provider: 'chatgpt', scope: 'generated-images',
+      media: [{ id: 'file_new', relativePath: 'new.png', status: 'complete' }] } });
+  assert.equal(downloads[0].conflictAction, 'uniquify');
+  assert.equal(result.status, 'queued');
+  assert.match(result.completionError, /did not confirm/);
+  assert.equal(durable.roots.get('export').publishedExact, false);
+  assert.equal(durable.roots.get('export').document.media.length, 2);
+});
 
 test('Grok and Gemini keep separate, validated one-click recovery checkpoints', async () => {
   const send = worker();

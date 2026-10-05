@@ -1,0 +1,33 @@
+name: Check and package GRID
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Validate JavaScript and manifest
+        run: |
+          for file in *.js scripts/*.js; do node --check "$file"; done
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync("manifest.json", "utf8")); for (const c of m.content_scripts) for (const file of c.js) { if (!fs.existsSync(file)) throw new Error(`Missing runtime script ${file}`); }'
+      - name: Run regression tests
+        run: node --test tests/*.test.js
+      - name: Package dependency-free extension
+        run: |
+          mkdir -p dist
+          zip -q dist/grid-extension.zip manifest.json *.js
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grid-extension
+          path: dist/grid-extension.zip
+          if-no-files-found: error

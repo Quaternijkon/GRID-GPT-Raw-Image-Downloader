@@ -74,6 +74,9 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
   const worker = vm.createContext({ chrome, console, URL, setTimeout });
   worker.importScripts = file => vm.runInContext(fs.readFileSync(file, 'utf8'), worker);
   vm.runInContext(fs.readFileSync('background.js', 'utf8'), worker);
+  const durableIndexes = new Map();
+  worker.GRIDMediaIndexStore = { read: async folder => durableIndexes.get(folder),
+    write: async (folder, record) => { durableIndexes.set(folder, record); } };
   const elements = new Map();
   const thumbnail = 'https://chatgpt.com/backend-api/estuary/content?id=file_abc123%23thumbnail&sig=preview';
   const original = 'https://files.oaiusercontent.com/file_abc123.png?sig=original';
@@ -179,6 +182,7 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
     let time = 0;
     return collectPrompts(entries, { ...options, now: () => time, sleep: async ms => { time += ms; } });
   };
+  vm.runInContext(fs.readFileSync('media-index.js', 'utf8'), context);
   vm.runInContext(fs.readFileSync('content.js', 'utf8'), context);
   vm.runInContext("chooseDownloadLocation = async () => 'original-quality-test'", context);
   vm.runInContext(`selectedAfterSequence = ${Number(afterSequence)}`, context);
@@ -200,6 +204,12 @@ test('content → original resolver → worker preserves bytes and exports pixel
   assert.equal(report.discovered, 1, 'scroll snapshots must deduplicate');
   assert.equal(report.queued, 1);
   assert.equal(report.failed, 0);
+  assert.equal(report.auxiliaryIndex.status, 'complete');
+  const auxiliary = downloads.find(item => item.filename === 'original-quality-test/.glry/grid-media-index.json');
+  const portable = JSON.parse(decodeURIComponent(auxiliary.url.split(',').slice(1).join(',')));
+  assert.equal(portable.media[0].createdAtNs, '1767225600000000000');
+  assert.equal(portable.media[0].status, 'complete');
+  assert.equal(portable.media[0].relativePath, '000001-sample.png');
   assert.equal(report.images[0].width, 1536);
   assert.equal(report.images[0].height, 1024);
   assert.match(report.images[0].sha256, /^[a-f0-9]{64}$/);

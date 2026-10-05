@@ -14,6 +14,7 @@ test('Gemini flow resumes by verified identity and writes grouped image, prompt,
   const progress = [{ kind: 'media', mediaId: first.id, sequence: 1, status: 'complete',
     relativePath: `gemini-images/${firstGroup}/000001-${first.id}.png` }];
   const chrome = { runtime: { getManifest: () => ({ version: '3.0.0' }), sendMessage(message, callback) {
+    if (message.action === 'saveGridMediaIndex') return callback({ ok: true, status: 'complete' });
     if (message.action === 'getMediaRetryCheckpoint') return callback({ status: 'missing', checkpoint: null });
     if (message.action === 'saveMediaRetryCheckpoint') return callback({ status: 'saved' });
     if (message.action === 'getGeminiProgress') return callback({ status: 'found', records: progress });
@@ -44,7 +45,7 @@ test('Gemini flow resumes by verified identity and writes grouped image, prompt,
       token: 'secret', pagination: { complete: true, pages: 1, images: 2 } }),
     resolvePrompts: async () => ({ chats: 2, resolved: 2, unresolved: 0, failures: [] }) },
     GRIDMediaExportUI: {} });
-  for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js', 'gemini-content.js'])
+  for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js', 'media-index.js', 'gemini-content.js'])
     vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   assert.equal(mounted[0].id, 'grid-gemini-export');
   const report = await context.GRIDGeminiExport.run({ folder: 'gemini-images', after: 0,
@@ -75,6 +76,7 @@ test('Gemini relocation converges on the one-shot folder layout after an interru
   const mediaCalls = [], cleanupCalls = [];
   let failCleanup = true, missingPrompt = false, nextId = 90;
   const chrome = { runtime: { getManifest: () => ({ version: '3.0.3' }), sendMessage(message, callback) {
+    if (message.action === 'saveGridMediaIndex') return callback({ ok: true, status: 'complete' });
     if (message.action === 'getMediaRetryCheckpoint') return callback({ status: 'missing', checkpoint: null });
     if (message.action === 'saveMediaRetryCheckpoint') return callback({ status: 'saved' });
     if (message.action === 'getGeminiProgress') return callback({ status: 'found', records: records.map(x => ({ ...x })) });
@@ -118,7 +120,7 @@ test('Gemini relocation converges on the one-shot folder layout after an interru
     pagination: { complete: true, pages: 1, images: 1 } }),
     resolvePrompts: async () => ({ chats: 1, resolved: missingPrompt ? 0 : 1,
       unresolved: missingPrompt ? 1 : 0, failures: [] }) }, GRIDMediaExportUI: {} });
-  for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js', 'gemini-content.js'])
+  for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js', 'media-index.js', 'gemini-content.js'])
     vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   const options = { folder: 'gemini-images', after: 0, mode: 'auto', prompts: true, concurrency: 'auto' };
   const first = await context.GRIDGeminiExport.run(options, () => {});

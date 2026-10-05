@@ -499,6 +499,21 @@
         completedMedia: latest.records.filter(record => record.kind === 'media' && record.status === 'complete').length
       };
     } catch (error) { report.progressAtFinish = { error: error.message }; }
+    try {
+      const currentIds = new Set(report.media.map(item => item.mediaId));
+      const records = [...progress.records.filter(item => item.kind === 'media' && !currentIds.has(item.mediaId)), ...report.media];
+      const index = globalThis.GRIDMediaIndex.build({ provider: 'grok', scope, folder: options.folder,
+        records, entries: found.entries, savePrompts: options.prompts });
+      report.auxiliaryIndex = await worker({ action: 'saveGridMediaIndex', folder: options.folder,
+        savePrompts: options.prompts, index, placements: records.filter(item => Number.isInteger(item.downloadId))
+          .map(item => ({ id: item.mediaId, downloadId: item.downloadId })) });
+      if (!report.auxiliaryIndex.ok || report.auxiliaryIndex.status !== 'complete' ||
+          report.auxiliaryIndex.cacheError || report.auxiliaryIndex.durableError)
+        throw new Error(report.auxiliaryIndex.error || report.auxiliaryIndex.completionError ||
+          report.auxiliaryIndex.cacheError || report.auxiliaryIndex.durableError || '辅助索引尚未确认写入磁盘。');
+    } catch (error) {
+      report.auxiliaryIndexError = error.message; report.warnings++; report.status = 'partial';
+    }
     const accepted = await worker({ action: 'grokDownload', kind: 'report', folder: options.folder,
       name: 'grok-download-results.json', url: dataUrl('application/json', JSON.stringify(report, null, 2)) });
     if (!accepted.ok) throw new Error('Chrome rejected Grok result report');

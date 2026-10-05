@@ -6,7 +6,7 @@ const webcrypto = require('node:crypto').webcrypto;
 const promptGroups = require('../prompt-groups.js');
 
 function fixture({ progressRecords = [], imagePayload = null, videoPayload = null, promptsFromConversation = false,
-  videoReportedSizeBytes = null, unresolvedFirst = false } = {}) {
+  videoReportedSizeBytes = null, unresolvedFirst = false, auxiliaryResult = null } = {}) {
   const downloads = [], objectUrls = new Map(), revoked = [], elements = new Map(), cleanupCalls = [];
   const storedProgress = [...progressRecords];
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
@@ -40,6 +40,7 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
   const chrome = { runtime: {
     getManifest: () => ({ version: '2.0.2' }),
     sendMessage(message, callback) {
+      if (message.action === 'saveGridMediaIndex') { callback(auxiliaryResult || { ok: true, status: 'complete' }); return; }
       if (message.action === 'getGrokProgress') { callback({ status: 'found', records: storedProgress }); return; }
       if (message.action === 'getMediaRetryCheckpoint') { callback({ status: 'missing', checkpoint: null }); return; }
       if (message.action === 'saveMediaRetryCheckpoint') { callback({ status: 'saved' }); return; }
@@ -92,7 +93,7 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
     }
   });
   for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js',
-    'grok-media.js', 'grok-content.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
+    'grok-media.js', 'media-index.js', 'grok-content.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
   return { context, downloads, objectUrls, revoked, png, mp4, elements, cleanupCalls };
 }
 
@@ -124,6 +125,19 @@ test('Grok flow saves original image/video bytes, direct prompts, and an explici
   const exported = JSON.parse(decodeURIComponent(downloads.at(-1).url.split(',').slice(1).join(',')));
   assert.equal(exported.completed, 2);
   assert.doesNotMatch(JSON.stringify(exported), /https:\/\/assets\.grok\.com/);
+});
+
+for (const auxiliaryResult of [
+  { ok: false, status: 'failed', error: 'Existing index has no recoverable merge base' },
+  { ok: true, status: 'complete', durableError: 'Durable index write failed' }
+]) test(`auxiliary failure reports its exact ${auxiliaryResult.error ? 'merge error' : 'durable write error'}`, async () => {
+  const { context } = fixture({ auxiliaryResult });
+  const report = await context.ChatGPTGrokExport.run('owned', { folder: 'grok-media', after: 0,
+    mode: 'auto', images: true, videos: false, prompts: false }, () => {});
+  assert.equal(report.status, 'partial');
+  assert.equal(report.auxiliaryIndexError, auxiliaryResult.error || auxiliaryResult.durableError);
+  assert.equal(report.completed, 1);
+  assert.equal(report.failed, 0);
 });
 
 test('manual Grok concurrency one remains serial and keeps media order', async () => {

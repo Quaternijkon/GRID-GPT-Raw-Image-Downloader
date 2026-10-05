@@ -178,6 +178,27 @@ function promptSource(record) {
     branchPath: record.branchPath, ruleVersion: record.ruleVersion, adapterVersion: record.adapterVersion };
 }
 
+async function exportGlryIndex(results, folder, entries, savePrompts, knownRecords = []) {
+  try {
+    const currentIds = new Set(results.images.map(item => item.fileId));
+    const records = [...knownRecords.filter(item => !currentIds.has(item.fileId)), ...results.images];
+    const index = globalThis.GRIDMediaIndex.build({ provider: 'chatgpt', scope: results.scope || 'generated-images',
+      folder, records, entries, savePrompts });
+    results.auxiliaryIndex = await sendToWorker({ action: 'saveGridMediaIndex', folder, savePrompts, index,
+      placements: records.filter(item => Number.isInteger(item.downloadId ?? item.imageDownloadId))
+        .map(item => ({ id: item.fileId, downloadId: item.downloadId ?? item.imageDownloadId })) });
+    if (!results.auxiliaryIndex.ok || results.auxiliaryIndex.status !== 'complete' ||
+        results.auxiliaryIndex.cacheError || results.auxiliaryIndex.durableError) {
+      results.auxiliaryIndexError = results.auxiliaryIndex.error || results.auxiliaryIndex.completionError ||
+        results.auxiliaryIndex.cacheError || results.auxiliaryIndex.durableError ||
+        '辅助索引已排队，尚未确认写入磁盘。';
+    }
+  } catch (error) {
+    results.auxiliaryIndex = { status: 'failed' };
+    results.auxiliaryIndexError = error.message;
+  }
+}
+
 const AUTO_PROMPT_RETRY_CODES = new Set(['target_not_found', 'response_shape', 'json_error', 'conversation_shape']);
 
 function summarizePromptErrors(errors) {
@@ -492,6 +513,7 @@ async function retryFailedImages(plan, { folder, ensureSameView, panel, status }
   try { const merged = await mergeCanonicalIndex(plan.page, folder, results.images); results.canonicalIndex = merged.result || merged; }
   catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
   const reportName = `chatgpt-image-retry-results-${Date.now()}.json`;
+  await exportGlryIndex(results, folder, plan.entries, plan.savePrompts === true);
   await requestDownload('data:application/json;charset=utf-8,' + encodeURIComponent(JSON.stringify(results, null, 2)),
     reportName, folder);
   panel.update({ stage: 'images', total: plan.entries.length, completed: plan.entries.length,
@@ -602,6 +624,7 @@ async function retryFailedPrompts(plan, { folder, ensureSameView, panel, status 
   }
   ensureSameView();
   const reportName = `chatgpt-prompt-retry-results-${Date.now()}.json`;
+  await exportGlryIndex(results, folder, plan.entries.map((entry, i) => ({ ...entry, prompt: collected.records[i] })), true);
   results.retryCheckpoint = await persistPromptRetryCheckpoint(results, folder);
   try { const merged = await mergeCanonicalIndex(plan.page, folder, results.images); results.canonicalIndex = merged.result || merged; }
   catch (error) { results.canonicalIndex = { saved: false, error: error.message }; }
@@ -806,6 +829,7 @@ function addBulkDownloadButton() {
       let numbering;
       let progressSummary = null;
       let promptProgressAtStart = [];
+      let imageProgressAtStart = [];
       try {
         numbering = imageNumbering.plan(primaryList, originalImages, { after: afterSequence });
         if (selectedBoundaryMode === 'auto') {
@@ -826,6 +850,7 @@ function addBulkDownloadButton() {
           progressSummary = { mode: 'auto', completedThrough: afterSequence,
             tracked: progressResponse.records.length };
           promptProgressAtStart = progressResponse.promptRecords || [];
+          imageProgressAtStart = progressResponse.records.filter(record => record.status === 'complete');
           meta.afterSequence = afterSequence;
         } else if (afterSequence > 0) {
           const baseline = numbering.all[afterSequence - 1];
@@ -1221,6 +1246,9 @@ function addBulkDownloadButton() {
             promptFilesCompleted: (latest.promptRecords || []).filter(record => record.status === 'complete').length };
         }
       } catch (error) { results.progressAtFinish = { error: error.message }; }
+      await exportGlryIndex(results, DOWNLOAD_FOLDER, grouping?.all || numbering.all, savePrompts,
+        imageProgressAtStart);
+      if (results.auxiliaryIndexError) results.warnings++;
       await exportJson(results, reportName);
       btn.textContent = files.length
         ? `${results.failed || results.warnings || meta.exportError || meta.progressError || promptExport.saveErrors.length || promptExport.progressErrors.length ? '⚠️' : '✓'} ${results.queued} 张原图已排队，${results.failed} 张失败，${results.warnings} 张有警告。编号 ${files[0].sequence}–${files[files.length - 1].sequence}；跳过 ${results.skipped} 张。${savePrompts ? ` ${grouping.selectedGroupCount} 个提示词目录，${grouping.selectedUnresolvedCount} 张进入恢复区，${promptExport.saveErrors.length} 个 TXT 失败。` : ''}${meta.progressError || promptExport.progressErrors.length ? ' 自动进度记录有误，详见报告。' : ''}详见 download-results.json${meta.exportError ? '（元数据导出失败）' : ''}`

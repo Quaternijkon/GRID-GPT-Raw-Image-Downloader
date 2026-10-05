@@ -23,6 +23,23 @@ test('immutable output snapshots append edits and discard all waiting text', () 
   assert.equal(JSON.stringify([a, b]).includes('never retain me'), false);
 });
 
+test('auxiliary history keeps only actual input timestamps and verified output ancestry within the same task', () => {
+  const input = base(), edit = node('edit', 'a', 'user', ['Add snow']);
+  input.message.create_time = '1767225500.123456789';
+  edit.message.create_time = 1767225600;
+  const c = conversation(input, output('a', 'u', 'file_a'), edit, output('b', 'edit', 'file_b'),
+    node('reset', 'b', 'user', [image('file_new'), 'A new mountain']), output('c', 'reset', 'file_c'));
+  const [a, b, reset] = resolve(c, 'file_a', 'file_b', 'file_c');
+  assert.equal(a.outputNodeId, 'a');
+  assert.equal(a.inputCreatedAt, '1767225500.123456789');
+  assert.equal(a.parentOutputNodeId, undefined);
+  assert.equal(b.parentOutputNodeId, 'a');
+  assert.equal(b.inputCreatedAt, 1767225600);
+  assert.equal(b.editSteps[0].createdAt, 1767225600);
+  assert.equal(reset.parentOutputNodeId, undefined);
+  assert.equal(reset.inputCreatedAt, undefined);
+});
+
 test('new references reset even while waiting; image-only waits for first text', () => {
   const c = conversation(base(), node('reset', 'u', 'user', [image('file_other')]),
     node('system', 'reset', 'assistant', ['acknowledged']), node('text', 'system', 'user', ['Q']),
