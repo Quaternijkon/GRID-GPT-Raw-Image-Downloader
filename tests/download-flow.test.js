@@ -28,13 +28,14 @@ function conversationFixture(records, conversationId, unresolved = []) {
 async function runFlow({ failImage = false, noOriginal = false, changePageDuringMetadata = false, gallerySize = 0, failGalleryPage = false, emptyDom = false, unavailableGallery = false, afterSequence = 0, concurrency = 6,
   savePrompts = false, promptRecords = null, unresolvedPrompts = [], failPrompt = false, changePageDuringPrompts = false,
   metadataRequiresAuth = false, conversationStatus = 200, sessionAvailable = true,
-  autoResume = false, priorCompleted = 0, priorInProgress = false } = {}) {
+  autoResume = false, priorCompleted = 0, priorInProgress = false, promptDownloadDelayMs = 0 } = {}) {
   let listener;
   const downloads = [];
   const galleryRequests = [];
   const conversationRequests = [];
   const conversationReads = [], sessionRequests = [];
   let conversationRateLimits = 0;
+  let activePromptDownloads = 0, peakPromptDownloads = 0;
   const panelUpdates = [];
   const settings = {};
   for (let sequence = 1; sequence <= priorCompleted; sequence++) {
@@ -62,8 +63,12 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
           callback();
           delete chrome.runtime.lastError;
         } else {
-          downloads.push(options);
-          callback(downloads.length);
+          const finish = () => { downloads.push(options); callback(downloads.length); };
+          if (promptDownloadDelayMs && options.url.startsWith('data:text/plain')) {
+            activePromptDownloads++;
+            peakPromptDownloads = Math.max(peakPromptDownloads, activePromptDownloads);
+            setTimeout(() => { activePromptDownloads--; finish(); }, promptDownloadDelayMs);
+          } else finish();
         }
       },
       search(query, callback) { callback(downloads[query.id - 1]
@@ -192,7 +197,8 @@ async function runFlow({ failImage = false, noOriginal = false, changePageDuring
   if (changePageDuringMetadata || changePageDuringPrompts) return { downloads, button, conversationRequests };
   assert.ok(reportDownload, 'results JSON must be exported even after image failures');
   const report = JSON.parse(decodeURIComponent(reportDownload.url.split(',').slice(1).join(',')));
-  return { downloads, report, button, imageBytes, galleryRequests, conversationRequests, conversationReads, sessionRequests, panelUpdates };
+  return { downloads, report, button, imageBytes, galleryRequests, conversationRequests, conversationReads,
+    sessionRequests, panelUpdates, peakPromptDownloads };
 }
 
 test('content → original resolver → worker preserves bytes and exports pixel/hash evidence', async () => {
@@ -323,18 +329,20 @@ test('automatic resume waits for an existing Chrome transfer instead of submitti
   assert.equal(downloads.filter(item => item.url.startsWith('data:image/')).length, 2);
 });
 
-test('automatic prompt mode repairs missing TXT files when every image is already complete', async () => {
+test('automatic prompt mode repairs missing TXT files in parallel when every image is already complete', async () => {
   const records = [
     { conversationId: 'conversation-a', prompt: 'Same prompt' },
     { conversationId: 'conversation-b', prompt: 'Other prompt' },
     { conversationId: 'conversation-a', prompt: 'Same prompt' }
   ];
-  const { report, downloads, button } = await runFlow({ gallerySize: 3, savePrompts: true,
-    promptRecords: records, autoResume: true, priorCompleted: 3 });
+  const { report, downloads, button, peakPromptDownloads } = await runFlow({ gallerySize: 3, savePrompts: true,
+    promptRecords: records, autoResume: true, priorCompleted: 3, promptDownloadDelayMs: 5 });
   assert.equal(report.afterSequence, 3);
   assert.equal(report.selected, 0);
   assert.equal(report.prompts.promptFilesToSave, 2);
+  assert.equal(report.prompts.promptSaveConcurrency, 2);
   assert.equal(downloads.filter(item => item.url.startsWith('data:text/plain')).length, 2);
+  assert.equal(peakPromptDownloads, 2, 'prompt.txt submissions should overlap after prompt recovery');
   assert.match(button.textContent, /已处理 2 个提示词文件/);
 });
 

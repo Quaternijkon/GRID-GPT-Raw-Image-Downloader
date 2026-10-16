@@ -5,6 +5,7 @@ const vm = require('node:vm');
 
 test('Gemini flow resumes by verified identity and writes grouped image, prompt, and report', async () => {
   const downloads = [];
+  let activePromptDownloads = 0, peakPromptDownloads = 0;
   const first = { id: `rc_${'a'.repeat(16)}`, chatId: `c_${'1'.repeat(16)}`,
     responseId: `r_${'1'.repeat(16)}`, sequence: 1, prompt: 'First prompt' };
   const second = { id: `rc_${'b'.repeat(16)}`, chatId: `c_${'2'.repeat(16)}`,
@@ -20,15 +21,23 @@ test('Gemini flow resumes by verified identity and writes grouped image, prompt,
     if (message.action === 'getGeminiDownloadState') return callback({ status: 'complete', exists: true });
     if (message.action === 'geminiDownload') {
       downloads.push(message);
+      const downloadId = downloads.length;
+      if (message.kind === 'prompt') {
+        activePromptDownloads++;
+        peakPromptDownloads = Math.max(peakPromptDownloads, activePromptDownloads);
+      }
       const path = `${message.folder}/${message.groupName ? `${message.groupName}/` : ''}${message.kind === 'media'
         ? `000002-${message.mediaId}.png` : message.name}`;
       if (message.kind === 'media') progress.push({ kind: 'media', mediaId: message.mediaId,
         sequence: message.sequence, status: 'complete', relativePath: path });
       if (message.kind === 'prompt') progress.push({ kind: 'prompt', groupName: message.groupName,
         status: 'complete', relativePath: path });
-      callback({ ok: true, downloadId: downloads.length, relativePath: path, bytes: 123,
+      const finish = () => callback({ ok: true, downloadId, relativePath: path, bytes: 123,
         mimeType: 'image/png', sha256: 'a'.repeat(64), sourceHost: 'lh3.googleusercontent.com',
         retrievalAttempts: 2 });
+      if (message.kind === 'prompt') {
+        setTimeout(() => { activePromptDownloads--; finish(); }, 5);
+      } else finish();
     }
   } } };
   const mounted = [];
@@ -54,6 +63,9 @@ test('Gemini flow resumes by verified identity and writes grouped image, prompt,
   assert.equal(report.failed, 0);
   assert.equal(report.progressAtFinish.completedThrough, 2);
   assert.equal(report.downloadPerformance.mode, 'auto');
+  assert.equal(report.promptFilesQueued, 2);
+  assert.equal(report.promptSaveConcurrency, 2);
+  assert.equal(peakPromptDownloads, 2, 'prompt.txt downloads should overlap after prompt recovery');
   assert.deepEqual(downloads.filter(item => item.kind === 'media').map(item => item.mediaId), [second.id]);
   assert.equal(downloads.find(item => item.kind === 'media').groupName,
     groups.groupIdentity(second.prompt).groupName);
@@ -147,4 +159,54 @@ test('Gemini relocation converges on the one-shot folder layout after an interru
   assert.equal(third.unresolvedPrompts, 1);
   assert.equal(mediaCalls.length, 1);
   assert.deepEqual([...files].sort(), [groupedPath, promptPath, reportPath].sort());
+});
+
+test('Gemini recovery reports vanished targets and resolves only requested conversations', async () => {
+  const first = { id: `rc_${'a'.repeat(16)}`, chatId: `c_${'1'.repeat(16)}`,
+    responseId: `r_${'1'.repeat(16)}`, sequence: 1, prompt: 'First prompt' };
+  const second = { id: `rc_${'b'.repeat(16)}`, chatId: `c_${'2'.repeat(16)}`,
+    responseId: `r_${'2'.repeat(16)}`, sequence: 2, prompt: 'Second prompt' };
+  const missingId = `rc_${'f'.repeat(16)}`;
+  const downloads = [], resolvedBatches = [];
+  const chrome = { runtime: { getManifest: () => ({ version: '3.0.5' }), sendMessage(message, callback) {
+    if (message.action === 'getMediaRetryCheckpoint') return callback({ status: 'missing', checkpoint: null });
+    if (message.action === 'saveMediaRetryCheckpoint') return callback({ status: 'saved' });
+    if (message.action === 'getGeminiProgress') return callback({ status: 'found', records: [] });
+    if (message.action === 'getGeminiDownloadState') return callback({ status: 'complete', exists: true });
+    if (message.action === 'geminiDownload') {
+      downloads.push(message);
+      const relativePath = `${message.folder}/${message.groupName ? `${message.groupName}/` : ''}${message.kind === 'media'
+        ? `${String(message.sequence).padStart(6, '0')}-${message.mediaId}.png` : message.name}`;
+      return callback({ ok: true, downloadId: downloads.length, relativePath,
+        ...(message.kind === 'media' ? { bytes: 100, mimeType: 'image/png', sha256: 'a'.repeat(64) } : {}) });
+    }
+    callback({ status: 'invalid', error: `Unexpected action ${message.action}` });
+  } } };
+  const context = vm.createContext({ chrome, console, URL, TextEncoder, navigator: {}, fetch: async () => {
+    throw new Error('Unexpected direct fetch');
+  }, location: { href: 'https://gemini.google.com/library', pathname: '/library' },
+  document: { body: { appendChild(node) { node.isConnected = true; } },
+    createElement() { return { style: {}, remove() { this.isConnected = false; } }; } },
+  window: { addEventListener() {} }, MutationObserver: class { observe() {} },
+  setTimeout, clearTimeout, setInterval: () => 0, clearInterval: () => {},
+  GRIDGeminiMedia: { supported: () => true,
+    collect: async () => ({ entries: [first, second], token: 'secret',
+      pagination: { complete: true, pages: 1, images: 2 } }),
+    resolvePrompts: async (_fetch, entries) => {
+      resolvedBatches.push(Array.from(entries, entry => entry.id));
+      return { chats: entries.length, resolved: entries.length, unresolved: 0, failures: [] };
+    } }, GRIDMediaExportUI: {} });
+  for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js', 'gemini-content.js'])
+    vm.runInContext(fs.readFileSync(file, 'utf8'), context);
+  const report = await context.GRIDGeminiExport.run({ folder: 'gemini-images', after: 0,
+    mode: 'report', prompts: true, retryIds: [first.id, missingId], concurrency: 'auto' }, () => {});
+  assert.equal(report.recoveryRequested, 2);
+  assert.deepEqual(Array.from(report.missingRetryIds), [missingId]);
+  assert.deepEqual(resolvedBatches, [[first.id]]);
+  assert.equal(report.selected, 1);
+  assert.equal(report.completed, 1);
+  assert.equal(report.failed, 1);
+  assert.equal(report.status, 'partial');
+  assert.equal(report.images.at(-1).failureCode, 'retry_target_missing');
+  assert.deepEqual(downloads.filter(item => item.kind === 'media').map(item => item.mediaId), [first.id]);
 });

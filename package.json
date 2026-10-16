@@ -1,0 +1,14 @@
+{
+  "name": "grid-media-exporter",
+  "version": "3.0.5",
+  "private": true,
+  "description": "Dependency-free Chrome MV3 media exporter for ChatGPT, Grok, and Gemini.",
+  "scripts": {
+    "check:syntax": "node scripts/check-syntax.js",
+    "test": "node --test tests/*.test.js",
+    "check": "npm run check:syntax && npm test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

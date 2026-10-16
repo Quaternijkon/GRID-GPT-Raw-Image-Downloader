@@ -58,6 +58,35 @@ test('Grok and Gemini keep separate, validated one-click recovery checkpoints', 
   assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }, grokPage)).checkpoint, null);
 });
 
+test('concurrent checkpoint updates merge instead of replacing another tab snapshot', async () => {
+  const send = worker();
+  const grokPage = 'https://grok.com/imagine';
+  const geminiPage = 'https://gemini.google.com/library';
+  const grok = { schemaVersion: 1, scope: 'owned', folder: 'grok-media',
+    failed: ['asset_000000001'], unresolved: [] };
+  const gemini = { schemaVersion: 1, scope: 'library', folder: 'gemini-images',
+    failed: [`rc_${'a'.repeat(16)}`], unresolved: [] };
+  await Promise.all([
+    send({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: grok }, grokPage),
+    send({ action: 'saveMediaRetryCheckpoint', provider: 'Gemini', checkpoint: gemini }, geminiPage)
+  ]);
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Grok' }, grokPage)).status, 'found');
+  assert.equal((await send({ action: 'getMediaRetryCheckpoint', provider: 'Gemini' }, geminiPage)).status, 'found');
+
+  const page = 'https://chatgpt.com/images';
+  const entry = sequence => ({ sequence, fileId: `file_00000000${sequence}`,
+    conversationId: `aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeee${sequence}`,
+    imageRelativePath: `images/未解析/${String(sequence).padStart(6, '0')}-file_00000000${sequence}.png`,
+    sourceDownloadId: 100 + sequence, promptStatus: 'unresolved',
+    promptError: { code: 'target_not_found', message: 'Target missing' } });
+  const checkpoint = image => ({ schemaVersion: 1, kind: 'prompt-retry-results',
+    createdAt: `2026-09-30T00:00:0${image.sequence}.000Z`, page, folder: 'images', images: [image] });
+  await Promise.all([1, 2].map(sequence => send({ action: 'savePromptRetryCheckpoint',
+    checkpoint: checkpoint(entry(sequence)), processedFileIds: [`file_00000000${sequence}`] }, page)));
+  const merged = await send({ action: 'getPromptRetryCheckpoint', page }, page);
+  assert.deepEqual(Array.from(merged.checkpoint.images, item => item.sequence), [1, 2]);
+});
+
 test('Gemini worker validates a full size image redirect, exact bytes, and tracked destination', async () => {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
   const base = `https://lh3.googleusercontent.com/gg/${'A'.repeat(50)}`;
@@ -403,7 +432,8 @@ test('automatic progress waits for disk completion and keeps page, folder, and p
 });
 
 test('manual boundary and prompt file progress are stored for automatic resume', async () => {
-  const send = worker();
+  const states = new Map();
+  const send = worker({ downloadId: 44, downloadStates: states });
   const page = 'https://chatgpt.com/images/';
   assert.equal((await send({ action: 'setDownloadBaseline', page, folder: 'images',
     savePrompts: true, sequence: 2, fileId: 'file_abc123' })).status, 'saved');
@@ -411,10 +441,53 @@ test('manual boundary and prompt file progress are stored for automatic resume',
   assert.equal((await send({ action: 'downloadFile', page, folder: 'images', kind: 'prompt',
     groupName, name: 'prompt.txt', conflictAction: 'overwrite',
     url: 'data:text/plain;charset=utf-8,hi', promptTracking: { page, groupName } })).ok, true);
+  states.set(44, { id: 44, state: 'complete', exists: true,
+    filename: `/Downloads/images/${groupName}/prompt.txt` });
   const response = await send({ action: 'getDownloadProgress', page, folder: 'images', savePrompts: true });
   assert.equal(response.baseline.sequence, 2);
   assert.equal(response.promptRecords[0].groupName, groupName);
   assert.equal(response.promptRecords[0].status, 'complete');
+});
+
+test('prompt completion requires the exact overwrite path, not a uniquified sibling', async () => {
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const relativePath = `images/${groupName}/prompt.txt`;
+  const states = new Map([[61, { id: 61, state: 'complete', exists: true,
+    filename: `/Downloads/images/${groupName}/prompt (1).txt` }]]);
+  const send = worker({ downloadId: 61, downloadStates: states });
+  const page = 'https://chatgpt.com/images';
+  await send({ action: 'downloadFile', page, folder: 'images', kind: 'prompt', groupName,
+    name: 'prompt.txt', conflictAction: 'overwrite', url: 'data:text/plain;charset=utf-8,hi',
+    promptTracking: { page, groupName } }, page);
+  const query = { action: 'getDownloadProgress', page, folder: 'images', savePrompts: true };
+  assert.equal((await send(query, page)).promptRecords[0].status, 'missing');
+  states.set(61, { id: 61, state: 'complete', exists: true, filename: `/Downloads/${relativePath}` });
+  assert.equal((await send(query, page)).promptRecords[0].status, 'complete');
+});
+
+test('Grok and Gemini state checks allow uniquify only for media paths', async () => {
+  const groupName = 'p-0123456789abcdef0123456789abcdef-a';
+  const states = new Map([
+    [71, { id: 71, state: 'complete', exists: true,
+      filename: `/Downloads/grok-media/${groupName}/prompt (1).txt` }],
+    [72, { id: 72, state: 'complete', exists: true,
+      filename: '/Downloads/grok-media/000001-asset_000000001 (1).png' }],
+    [73, { id: 73, state: 'complete', exists: true,
+      filename: `/Downloads/gemini-images/${groupName}/prompt (1).txt` }],
+    [74, { id: 74, state: 'complete', exists: true,
+      filename: `/Downloads/gemini-images/000001-rc_${'a'.repeat(16)} (1).png` }]
+  ]);
+  const send = worker({ downloadStates: states });
+  const grokPage = 'https://grok.com/imagine';
+  const geminiPage = 'https://gemini.google.com/library';
+  assert.equal((await send({ action: 'getGrokDownloadState', downloadId: 71,
+    relativePath: `grok-media/${groupName}/prompt.txt` }, grokPage)).exists, false);
+  assert.equal((await send({ action: 'getGrokDownloadState', downloadId: 72,
+    relativePath: 'grok-media/000001-asset_000000001.png' }, grokPage)).exists, true);
+  assert.equal((await send({ action: 'getGeminiDownloadState', downloadId: 73,
+    relativePath: `gemini-images/${groupName}/prompt.txt` }, geminiPage)).exists, false);
+  assert.equal((await send({ action: 'getGeminiDownloadState', downloadId: 74,
+    relativePath: `gemini-images/000001-rc_${'a'.repeat(16)}.png` }, geminiPage)).exists, true);
 });
 
 test('automatic progress recovers pre-upgrade completed files from the canonical index and Chrome history', async () => {

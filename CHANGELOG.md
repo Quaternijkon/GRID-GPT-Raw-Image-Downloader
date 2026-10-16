@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Expand the shared speed chart and add a per-second items/s heatmap. Refresh idle rates locally and use KiB/s for small transfers.
+- Replace the finish-time forecast chart with elapsed time and estimated remaining time beside the main task progress bar. Show actual prompt-file progress during parallel TXT writes.
+- Simplify the download panel, preserve essential errors and recovery actions, and support light, dark and narrow-screen layouts.
+
 ## 3.0.5 — 2026-09-30
 
 - Replace the decorative progress sparkline with a time-based 60-second throughput chart and compact metrics. Show a bounded item-completion forecast, concurrency history, and a mutually exclusive processed/active/pending distribution.

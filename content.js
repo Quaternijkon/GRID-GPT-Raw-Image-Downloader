@@ -996,7 +996,9 @@ function addBulkDownloadButton() {
           ? grouping.groups.filter(group => selectedGroupNames.has(group.groupName) ||
             !completedPromptNames.has(group.groupName)) : grouping.selectedGroups;
         promptExport.promptFilesToSave = groupsToSave.length;
-        for (const group of groupsToSave) {
+        promptExport.promptSaveConcurrency = Math.min(downloadQueue.PROMPT_SAVE_CONCURRENCY, groupsToSave.length);
+        let promptSaveFailures = 0;
+        const promptSaveOutcomes = await downloadQueue.run(groupsToSave, async group => {
           ensureSameView();
           const saved = { groupNumber: group.groupNumber, groupName: group.groupName,
             relativePath: `${DOWNLOAD_FOLDER}/${group.groupName}/prompt.txt`, status: 'failed' };
@@ -1009,17 +1011,28 @@ function addBulkDownloadButton() {
             saved.status = 'queued';
             if (receipt.trackingError) {
               saved.trackingError = receipt.trackingError;
-              promptExport.progressErrors.push({ groupName: group.groupName, error: receipt.trackingError });
             }
           } catch (error) {
             saved.error = error.message;
             saved.attempts = error.saveAttempts || 3;
-            promptExport.saveErrors.push({ groupNumber: group.groupNumber, error: error.message });
+            promptSaveFailures++;
           }
-          promptExport.saves.push(saved);
-          panel.update({ promptSaveErrors: promptExport.saveErrors.length,
-            message: `prompt.txt ${promptExport.saves.length}/${groupsToSave.length} 已处理` });
-        }
+          return saved;
+        }, { concurrency: downloadQueue.PROMPT_SAVE_CONCURRENCY, checkActive: ensureSameView,
+          onProgress: update => panel.update({ promptSaveErrors: promptSaveFailures,
+            promptFilesProcessed: update.completed, promptFilesTotal: groupsToSave.length,
+            active: update.active, limit: promptExport.promptSaveConcurrency,
+            message: `prompt.txt ${update.completed}/${groupsToSave.length} 已并行处理` }) });
+        ensureSameView();
+        promptExport.saves = promptSaveOutcomes.map((outcome, index) => outcome.status === 'fulfilled'
+          ? outcome.value : { groupNumber: groupsToSave[index].groupNumber,
+            groupName: groupsToSave[index].groupName,
+            relativePath: `${DOWNLOAD_FOLDER}/${groupsToSave[index].groupName}/prompt.txt`,
+            status: 'failed', error: outcome.reason?.message || String(outcome.reason) });
+        promptExport.saveErrors = promptExport.saves.filter(saved => saved.status === 'failed')
+          .map(saved => ({ groupNumber: saved.groupNumber, error: saved.error }));
+        promptExport.progressErrors = promptExport.saves.filter(saved => saved.trackingError)
+          .map(saved => ({ groupName: saved.groupName, error: saved.trackingError }));
         promptExport.saveStatus = promptExport.saveErrors.length ? 'partial' : groupsToSave.length ? 'queued' : 'not-needed';
       }
       await exportMetadata();

@@ -165,7 +165,8 @@
   }
 
   function selectedEntry(entry, options, completed) {
-    return (!options.retryIds || options.retryIds.includes(entry.id)) && entry.sequence > options.after &&
+    if (options.retryIds) return options.retryIds.includes(entry.id);
+    return entry.sequence > options.after &&
       (entry.kind === 'image' ? options.images : options.videos) &&
       (options.mode !== 'auto' || !completed.has(entry.id));
   }
@@ -179,11 +180,15 @@
     const found = await media.collectCurrent(fetch, scope, { checkActive,
       onProgress: progress => status(`已读取 ${progress.pages} 页、${progress.posts} 条记录…`,
         { stage: 'collecting', phase: 'collecting' }) });
-    const promptCollection = options.prompts ? await media.resolvePrompts(found.entries, {
-      checkActive, onProgress: progress => status(`正在恢复提示词 ${progress.processed}/${progress.total} 个会话 · 已匹配 ${progress.resolved}/${found.entries.length} 个媒体…`,
+    const promptEntries = options.prompts
+      ? options.retryIds ? found.entries.filter(entry => options.retryIds.includes(entry.id)) : found.entries
+      : [];
+    const promptEvaluatedIds = new Set(promptEntries.map(entry => entry.id));
+    const promptCollection = options.prompts ? await media.resolvePrompts(promptEntries, {
+      checkActive, onProgress: progress => status(`正在恢复提示词 ${progress.processed}/${progress.total} 个会话 · 已匹配 ${progress.resolved}/${promptEntries.length} 个媒体…`,
         { stage: 'prompts', phase: 'prompts', processedConversations: progress.processed,
           totalConversations: progress.total, resolvedImages: progress.resolved,
-          totalImages: found.entries.length, promptErrors: Math.max(0, found.entries.length - progress.resolved) })
+          totalImages: promptEntries.length, promptErrors: Math.max(0, promptEntries.length - progress.resolved) })
     }) : null;
     let progress;
     try { progress = await worker({ action: 'getGrokProgress', folder: options.folder,
@@ -236,6 +241,9 @@
     }
     if (options.after > found.entries.length) throw new Error(`手动编号 ${options.after} 超出当前 ${found.entries.length} 个媒体。`);
     const selected = found.entries.filter(entry => selectedEntry(entry, options, completed));
+    const requestedRetryIds = options.retryIds ? [...new Set(options.retryIds)] : [];
+    const discoveredIds = new Set(found.entries.map(entry => entry.id));
+    const missingRetryIds = requestedRetryIds.filter(id => !discoveredIds.has(id));
     const selectedGroupCount = options.prompts ? new Set(selected.map(entry => entry.groupName)).size : 0;
     const report = { schemaVersion: 1, kind: 'grok-download-results', extensionVersion: chrome.runtime.getManifest().version,
       page: startUrl, scope, createdAt: new Date().toISOString(), folder: options.folder,
@@ -245,6 +253,7 @@
       progressAtStart: { completedThrough: completedThrough(progress.records),
         completedMedia: completed.size },
       discovered: found.entries.length, selected: selected.length, skipped: found.entries.length - selected.length,
+      ...(requestedRetryIds.length ? { recoveryRequested: requestedRetryIds.length, missingRetryIds } : {}),
       queued: 0, completed: 0, failed: 0, warnings: 0, layoutIssues: 0,
       promptFilesQueued: 0, promptFilesFailed: 0,
       qualityPolicy: 'Preferred original media URL; exact response bytes, no preview substitution or re-encoding.',
@@ -253,10 +262,12 @@
     status(`已发现 ${found.entries.length} 个媒体，本次处理 ${selected.length} 个。`,
       { stage: options.prompts ? 'grouping' : 'images', phase: options.prompts ? 'prompts' : 'transferring',
         total: selected.length, processed: 0, completed: 0, failed: 0,
-        totalImages: found.entries.length, resolvedImages: found.entries.length - (promptCollection?.unresolved || 0),
+        totalImages: options.prompts ? promptEntries.length : found.entries.length,
+        resolvedImages: options.prompts ? promptEntries.length - (promptCollection?.unresolved || 0) : found.entries.length,
         totalConversations: promptCollection?.conversations, processedConversations: promptCollection?.conversations,
         groupCount: promptGroups.size, selectedGroupCount, promptErrors: promptCollection?.unresolved || 0 });
     if (options.prompts) for (const entry of found.entries) {
+      if (options.retryIds && !promptEvaluatedIds.has(entry.id)) continue;
       const prior = byId.get(entry.id);
       const previous = previousRecovery(entry, prior);
       if (!prior?.previousRecovery || !previous || !matchesDestination(entry, prior)) continue;
@@ -276,15 +287,12 @@
       const savedPrompts = new Set(progress.records.filter(record => record.kind === 'prompt' && record.status === 'complete')
         .map(record => record.groupName));
       const selectedGroups = new Set(selected.map(entry => entry.groupName));
-      for (const [groupName, prompt] of promptGroups) {
-        if (options.mode === 'auto' && !selectedGroups.has(groupName) && savedPrompts.has(groupName)) continue;
-        if (options.mode !== 'auto' && !selectedGroups.has(groupName)) continue;
+      const promptTasks = [...promptGroups].filter(([groupName]) => options.mode === 'auto'
+        ? selectedGroups.has(groupName) || !savedPrompts.has(groupName) : selectedGroups.has(groupName));
+      report.promptSaveConcurrency = Math.min(queue.PROMPT_SAVE_CONCURRENCY, promptTasks.length);
+      let promptQueued = 0, promptFailed = 0;
+      const promptOutcomes = await queue.run(promptTasks, async ([groupName, prompt]) => {
         checkActive();
-        status(`正在保存提示词 ${report.promptFiles.length + 1}/${promptGroups.size}…`,
-          { stage: 'prompt-save', phase: 'prompts', total: selected.length,
-            totalImages: found.entries.length, resolvedImages: found.entries.length - (promptCollection?.unresolved || 0),
-            groupCount: promptGroups.size, selectedGroupCount, promptErrors: promptCollection?.unresolved || 0,
-            promptSaveErrors: report.promptFilesFailed });
         const record = { groupName, status: 'failed' };
         try {
           if (new TextEncoder().encode(prompt).length > 100000) throw new Error('Prompt exceeds supported TXT size');
@@ -293,12 +301,26 @@
           if (!accepted.ok) throw new Error('Chrome rejected prompt.txt');
           record.downloadId = accepted.downloadId;
           record.relativePath = accepted.relativePath;
-          report.promptFilesQueued++;
+          promptQueued++;
           record.status = await waitForDownload(accepted.downloadId, accepted.relativePath, checkActive);
-          if (accepted.trackingError) { record.trackingError = accepted.trackingError; report.warnings++; }
-        } catch (error) { record.error = error.message; report.promptFilesFailed++; }
-        report.promptFiles.push(record);
-      }
+          if (accepted.trackingError) record.trackingError = accepted.trackingError;
+        } catch (error) { record.error = error.message; promptFailed++; }
+        return record;
+      }, { concurrency: queue.PROMPT_SAVE_CONCURRENCY, checkActive,
+        onProgress: update => status(`正在并行保存提示词 ${update.completed}/${promptTasks.length}…`,
+          { stage: 'prompt-save', phase: 'prompts', total: selected.length,
+            totalImages: promptEntries.length,
+            resolvedImages: promptEntries.length - (promptCollection?.unresolved || 0),
+            groupCount: promptGroups.size, selectedGroupCount, promptErrors: promptCollection?.unresolved || 0,
+            promptSaveErrors: promptFailed, active: update.active,
+            promptFilesProcessed: update.completed, promptFilesTotal: promptTasks.length,
+            limit: report.promptSaveConcurrency }) });
+      checkActive();
+      report.promptFiles = promptOutcomes.map((outcome, index) => outcome.status === 'fulfilled'
+        ? outcome.value : { groupName: promptTasks[index][0], status: 'failed',
+          error: outcome.reason?.message || String(outcome.reason) });
+      report.promptFilesQueued = promptQueued;
+      report.promptFilesFailed = report.promptFiles.filter(item => item.status === 'failed').length;
     }
     const deviceMemory = typeof navigator !== 'undefined' ? navigator.deviceMemory : undefined;
     const memoryBudgetBytes = (deviceMemory && deviceMemory <= 4 ? 192 : deviceMemory >= 8 ? 512 : 384) * 1048576;
@@ -451,6 +473,10 @@
       sequence: selected[index].sequence, mediaId: selected[index].id, mediaType: selected[index].kind,
       status: 'failed', warnings: [], error: outcome.reason?.message || String(outcome.reason)
     });
+    report.media.push(...missingRetryIds.map(mediaId => ({ mediaId, mediaType: null,
+      status: 'failed', warnings: [], failureCode: 'retry_target_missing',
+      promptStatus: options.prompts ? 'unresolved' : 'disabled',
+      error: '恢复目标已不在当前 Grok 媒体列表中' })));
     report.queued = report.media.filter(item => Number.isInteger(item.downloadId)).length;
     report.completed = report.media.filter(item => item.status === 'complete').length;
     report.failed = report.media.filter(item => item.status === 'failed').length;
@@ -472,12 +498,13 @@
     const attempted = new Set(selected.map(entry => entry.id));
     const failed = new Set((previousCheckpoint.checkpoint?.failed || []).filter(id => !attempted.has(id)));
     const unresolved = new Set((previousCheckpoint.checkpoint?.unresolved || []).filter(id =>
-      !options.prompts || !found.entries.some(entry => entry.id === id)));
+      !options.prompts || !promptEvaluatedIds.has(id)));
     for (const item of report.media) if (item.status !== 'complete') failed.add(item.mediaId);
     if (options.prompts) {
-      for (const entry of found.entries) if (!entry.prompt) unresolved.add(entry.id);
+      for (const id of missingRetryIds) unresolved.add(id);
+      for (const entry of promptEntries) if (!entry.prompt) unresolved.add(entry.id);
       const failedGroups = new Set(report.promptFiles.filter(item => item.status !== 'complete').map(item => item.groupName));
-      for (const entry of found.entries) if (failedGroups.has(entry.groupName)) unresolved.add(entry.id);
+      for (const entry of promptEntries) if (failedGroups.has(entry.groupName)) unresolved.add(entry.id);
     }
     try {
       const saved = await worker({ action: 'saveMediaRetryCheckpoint', provider: 'Grok', checkpoint: {
@@ -526,9 +553,10 @@
           panel = makeProgressPanel(() => { button.style.display = ''; button.textContent = '⬇️ 导出 Grok 图片与视频'; }, options);
           const report = await run(media.scope(location.pathname), options,
             (message, progress) => panel.update(message, progress));
-          panel.update(`${report.status === 'partial' ? '⚠️' : '✓'} ${report.completed}/${report.selected} 个媒体已完成，${report.failed} 个失败，${report.warnings} 条警告；详见结果报告`,
+          const reportedTotal = report.recoveryRequested || report.selected;
+          panel.update(`${report.status === 'partial' ? '⚠️' : '✓'} ${report.completed}/${reportedTotal} 个媒体已完成，${report.failed} 个失败，${report.warnings} 条警告；详见结果报告`,
             { stage: 'images', phase: report.status === 'partial' ? 'completed with issues' : 'complete',
-              total: report.selected, processed: report.selected, queued: report.queued,
+              total: reportedTotal, processed: reportedTotal, queued: report.queued,
               failed: report.failed, warnings: report.warnings,
               bytes: report.downloadPerformance.receivedBytes,
               promptErrors: report.promptCollection?.unresolved || 0,

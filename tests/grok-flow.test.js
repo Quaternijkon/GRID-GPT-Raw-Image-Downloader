@@ -6,8 +6,9 @@ const webcrypto = require('node:crypto').webcrypto;
 const promptGroups = require('../prompt-groups.js');
 
 function fixture({ progressRecords = [], imagePayload = null, videoPayload = null, promptsFromConversation = false,
-  videoReportedSizeBytes = null, unresolvedFirst = false } = {}) {
+  videoReportedSizeBytes = null, unresolvedFirst = false, promptDownloadDelayMs = 0 } = {}) {
   const downloads = [], objectUrls = new Map(), revoked = [], elements = new Map(), cleanupCalls = [];
+  const promptActivity = { active: 0, peak: 0 };
   const storedProgress = [...progressRecords];
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAaX2RUAAAAAASUVORK5CYII=', 'base64');
   const mp4 = Buffer.from([0, 0, 0, 24, 102, 116, 121, 112, 105, 115, 111, 109, 0, 0, 0, 0]);
@@ -46,6 +47,7 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
       if (message.action === 'getGrokDownloadState') { callback({ status: 'complete', exists: true }); return; }
       if (message.action === 'grokDownload') {
         downloads.push(message);
+        const downloadId = downloads.length;
         const root = message.groupName === '未解析' ? `${message.folder}/未解析` :
           message.groupName ? `${message.folder}/${message.groupName}` : message.folder;
         const relativePath = `${root}/${message.name}`;
@@ -53,7 +55,12 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
           mediaId: message.mediaId, mediaType: message.mediaType, status: 'complete', relativePath });
         if (message.kind === 'prompt') storedProgress.push({ kind: 'prompt', groupName: message.groupName,
           status: 'complete' });
-        callback({ ok: true, downloadId: downloads.length, relativePath });
+        const finish = () => callback({ ok: true, downloadId, relativePath });
+        if (message.kind === 'prompt' && promptDownloadDelayMs) {
+          promptActivity.active++;
+          promptActivity.peak = Math.max(promptActivity.peak, promptActivity.active);
+          setTimeout(() => { promptActivity.active--; finish(); }, promptDownloadDelayMs);
+        } else finish();
         return;
       }
       if (message.action === 'cleanupGrokRecovery') {
@@ -93,12 +100,12 @@ function fixture({ progressRecords = [], imagePayload = null, videoPayload = nul
   });
   for (const file of ['original-images.js', 'download-queue.js', 'prompt-groups.js',
     'grok-media.js', 'grok-content.js']) vm.runInContext(fs.readFileSync(file, 'utf8'), context);
-  return { context, downloads, objectUrls, revoked, png, mp4, elements, cleanupCalls };
+  return { context, downloads, objectUrls, revoked, png, mp4, elements, cleanupCalls, promptActivity };
 }
 
 test('Grok flow saves original image/video bytes, direct prompts, and an explicit result report', async () => {
-  const fixtureData = fixture();
-  const { context, downloads, objectUrls, revoked, png, mp4, elements } = fixtureData;
+  const fixtureData = fixture({ promptDownloadDelayMs: 5 });
+  const { context, downloads, objectUrls, revoked, png, mp4, elements, promptActivity } = fixtureData;
   assert.ok(elements.get('grid-grok-export'), 'Grok page should display its export button');
   const report = await context.ChatGPTGrokExport.run('owned', {
     folder: 'grok-media', after: 0, mode: 'auto', images: true, videos: true, prompts: true
@@ -110,6 +117,8 @@ test('Grok flow saves original image/video bytes, direct prompts, and an explici
   assert.equal(report.completed, 2);
   assert.equal(report.failed, 0);
   assert.equal(report.promptFilesQueued, 2);
+  assert.equal(report.promptSaveConcurrency, 2);
+  assert.equal(promptActivity.peak, 2, 'prompt.txt downloads should overlap after prompt recovery');
   assert.equal(report.progressAtFinish.completedThrough, 2);
   assert.equal(report.downloadPerformance.mode, 'auto');
   assert.equal(report.downloadPerformance.peakActive, 2);
@@ -273,4 +282,29 @@ test('Grok rejects mislabeled video bytes, reports partial failure, and saves no
   assert.match(report.media[1].error, /do not match/);
   assert.equal(downloads.filter(item => item.kind === 'media').length, 1);
   assert.equal(downloads.at(-1).kind, 'report');
+});
+
+test('Grok recovery reports vanished targets and resolves prompts only for requested media', async () => {
+  const { context, downloads } = fixture({ promptsFromConversation: true });
+  const resolvedBatches = [];
+  const resolvePrompts = context.ChatGPTGrokMedia.resolvePrompts;
+  context.ChatGPTGrokMedia.resolvePrompts = async (entries, options) => {
+    resolvedBatches.push(Array.from(entries, entry => entry.id));
+    return resolvePrompts(entries, options);
+  };
+  const missingId = 'asset_999999999';
+  const report = await context.ChatGPTGrokExport.run('owned', {
+    folder: 'grok-media', after: 0, mode: 'report', images: false, videos: false,
+    prompts: true, retryIds: ['asset_000000001', missingId], concurrency: 'auto'
+  }, () => {});
+  assert.equal(report.recoveryRequested, 2);
+  assert.deepEqual(Array.from(report.missingRetryIds), [missingId]);
+  assert.deepEqual(resolvedBatches, [['asset_000000001']]);
+  assert.equal(report.selected, 1);
+  assert.equal(report.completed, 1);
+  assert.equal(report.failed, 1);
+  assert.equal(report.status, 'partial');
+  assert.equal(report.media.at(-1).failureCode, 'retry_target_missing');
+  assert.deepEqual(downloads.filter(item => item.kind === 'media').map(item => item.mediaId),
+    ['asset_000000001']);
 });

@@ -130,6 +130,21 @@ const chromeCall = (fn, arg) => new Promise((resolve, reject) => fn(arg, result 
   if (error) reject(new Error(error.message)); else resolve(result);
 }));
 
+// chrome.storage.local has no transactional read-modify-write operation. Keep
+// shared object stores serialized so concurrent tabs and download tasks cannot
+// replace each other's checkpoint updates with stale snapshots.
+const storageMutationQueues = new Map();
+function queueStorageMutation(store, task) {
+  const previous = storageMutationQueues.get(store) || Promise.resolve();
+  const current = previous.then(task, task);
+  const tail = current.then(() => undefined, () => undefined);
+  storageMutationQueues.set(store, tail);
+  tail.then(() => {
+    if (storageMutationQueues.get(store) === tail) storageMutationQueues.delete(store);
+  });
+  return current;
+}
+
 function checkpointPage(value) {
   try {
     const url = new URL(value);
@@ -143,10 +158,11 @@ const progressPage = value => checkpointPage(value)?.replace(/\/$/, '') || null;
 const progressPrefix = (page, folder, savePrompts) =>
   `gridDownloadProgress:${page}\n${folder}\n${savePrompts ? 'prompts' : 'images'}\n`;
 
-function downloadPathMatches(filename, relativePath) {
-  if (typeof filename !== 'string') return true;
+function downloadPathMatches(filename, relativePath, allowUniquify = false) {
+  if (typeof filename !== 'string') return false;
   const actual = filename.replace(/\\/g, '/');
   if (actual.endsWith(`/${relativePath}`)) return true;
+  if (!allowUniquify) return false;
   const slash = relativePath.lastIndexOf('/');
   const dot = relativePath.lastIndexOf('.');
   if (dot <= slash) return false;
@@ -184,10 +200,11 @@ async function recoverLegacyProgress(values, page, folder, savePrompts, images, 
       (item.filename.replace(/\\/g, '/').includes(`/${folder}/`) ||
         item.filename.replace(/\\/g, '/').includes(`/${folder}-recovery/`))));
   }));
-  const match = path => history.find(item => downloadPathMatches(item.filename, path));
+  const match = (path, allowUniquify) => history.find(item =>
+    downloadPathMatches(item.filename, path, allowUniquify));
   const writes = {};
   for (const item of missingImages) {
-    const download = match(item.relativePath);
+    const download = match(item.relativePath, true);
     if (!download) continue;
     const record = { sequence: item.sequence, fileId: item.fileId,
       downloadId: download.id, relativePath: item.relativePath };
@@ -196,7 +213,7 @@ async function recoverLegacyProgress(values, page, folder, savePrompts, images, 
   }
   for (const groupName of missingGroups) {
     const relativePath = `${folder}/${groupName}/prompt.txt`;
-    const download = match(relativePath);
+    const download = match(relativePath, false);
     if (!download) continue;
     const record = { groupName, downloadId: download.id, relativePath };
     writes[`${prefix}prompt:${groupName}`] = record;
@@ -273,11 +290,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const context = mediaRetryContext(msg.provider, grokScope, geminiPage);
       if (!context) { sendResponse({ status: 'invalid', error: 'Invalid media retry provider' }); return false; }
       void (async () => {
-        const values = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb), [mediaRetryStore]);
-        const checkpoints = values?.[mediaRetryStore] && typeof values[mediaRetryStore] === 'object'
-          ? { ...values[mediaRetryStore] } : {};
         const key = `${msg.provider}:${context.scope}\n${msg.folder || ''}`;
         if (msg.action === 'getMediaRetryCheckpoint') {
+          const values = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb), [mediaRetryStore]);
+          const checkpoints = values?.[mediaRetryStore] && typeof values[mediaRetryStore] === 'object'
+            ? values[mediaRetryStore] : {};
           const found = typeof msg.folder === 'string' ? checkpoints[key] :
             Object.entries(checkpoints).filter(([name, value]) => name.startsWith(`${msg.provider}:${context.scope}\n`) &&
               validMediaRetry(value, context) && (value.failed.length || value.unresolved.length))
@@ -287,12 +304,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         const checkpoint = msg.checkpoint;
         if (!validMediaRetry(checkpoint, context)) throw new Error('Invalid media retry checkpoint');
-        checkpoints[`${msg.provider}:${context.scope}\n${checkpoint.folder}`] =
-          { ...checkpoint, savedAt: Date.now() };
-        const ordered = Object.entries(checkpoints).sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0)).slice(0, 20);
-        await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
-          { [mediaRetryStore]: Object.fromEntries(ordered) });
-        return { status: 'saved', failed: checkpoint.failed.length, unresolved: checkpoint.unresolved.length };
+        return queueStorageMutation(mediaRetryStore, async () => {
+          const values = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb), [mediaRetryStore]);
+          const checkpoints = values?.[mediaRetryStore] && typeof values[mediaRetryStore] === 'object'
+            ? { ...values[mediaRetryStore] } : {};
+          const checkpointKey = `${msg.provider}:${context.scope}\n${checkpoint.folder}`;
+          if (checkpoint.failed.length || checkpoint.unresolved.length)
+            checkpoints[checkpointKey] = { ...checkpoint, savedAt: Date.now() };
+          else delete checkpoints[checkpointKey];
+          const ordered = Object.entries(checkpoints)
+            .sort((a, b) => (b[1].savedAt || 0) - (a[1].savedAt || 0)).slice(0, 20);
+          await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
+            { [mediaRetryStore]: Object.fromEntries(ordered) });
+          return { status: 'saved', failed: checkpoint.failed.length, unresolved: checkpoint.unresolved.length };
+        });
       })().then(sendResponse, error => sendResponse({ status: 'error', error: error.message }));
       return true;
     }
@@ -330,7 +355,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
               const items = await chromeCall((query, cb) => chrome.downloads.search(query, cb), { id: value.downloadId });
               const item = items?.[0];
               return { ...value, status: item?.state === 'complete' && item.exists === true &&
-                typeof item.filename === 'string' && downloadPathMatches(item.filename, value.relativePath) ? 'complete' :
+                typeof item.filename === 'string' &&
+                downloadPathMatches(item.filename, value.relativePath, value.kind === 'media') ? 'complete' :
                 item?.state === 'in_progress' ? 'in_progress' : 'missing' };
             }));
             records.push(...batch);
@@ -344,7 +370,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const items = await chromeCall((query, cb) => chrome.downloads.search(query, cb), { id: msg.downloadId });
           const item = items?.[0];
           return { status: item?.state || 'missing', exists: item?.exists === true &&
-            typeof item.filename === 'string' && downloadPathMatches(item.filename, msg.relativePath) };
+            typeof item.filename === 'string' &&
+            downloadPathMatches(item.filename, msg.relativePath, !msg.relativePath.endsWith('/prompt.txt')) };
         }
         if (msg.action === 'showDownloadFolder') {
           chrome.downloads.showDefaultFolder(); return { status: 'opened' };
@@ -411,11 +438,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const newItems = await chromeCall((query, cb) => chrome.downloads.search(query, cb), { id: msg.newDownloadId });
           if (newItems?.[0]?.state !== 'complete' || newItems[0].exists !== true ||
               typeof newItems[0].filename !== 'string' ||
-              !downloadPathMatches(newItems[0].filename, saved.relativePath)) throw new Error('Gemini cleanup files are incomplete');
+              !downloadPathMatches(newItems[0].filename, saved.relativePath, true)) throw new Error('Gemini cleanup files are incomplete');
           const old = oldItems?.[0];
           let cleanupStatus = 'old-file-already-absent';
           if (old?.state === 'complete' && old.exists === true) {
-            if (typeof old.filename !== 'string' || !downloadPathMatches(old.filename, msg.oldRelativePath))
+            if (typeof old.filename !== 'string' || !downloadPathMatches(old.filename, msg.oldRelativePath, true))
               throw new Error('Old Gemini recovery download has moved');
             await chromeCall((id, cb) => chrome.downloads.removeFile(id, cb), msg.oldDownloadId);
             chrome.downloads.erase({ id: msg.oldDownloadId }, () => { void chrome.runtime.lastError; });
@@ -524,7 +551,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const item = items?.[0];
           sendResponse(error ? { status: 'error', error: error.message } :
             { status: item?.state || 'missing', exists: item?.exists === true &&
-              typeof item.filename === 'string' && downloadPathMatches(item.filename, msg.relativePath) });
+              typeof item.filename === 'string' &&
+              downloadPathMatches(item.filename, msg.relativePath, !msg.relativePath.endsWith('/prompt.txt')) });
         });
         return true;
       }
@@ -560,7 +588,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           const newer = await search(msg.newDownloadId);
           if (newer?.state !== 'complete' || newer.exists !== true ||
               typeof newer.filename !== 'string' ||
-              !downloadPathMatches(newer.filename, saved.relativePath)) {
+              !downloadPathMatches(newer.filename, saved.relativePath, true)) {
             throw new Error('New grouped download is not complete');
           }
           const old = await search(msg.oldDownloadId);
@@ -578,7 +606,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
             await finishCleanup('old-file-missing'); return;
           }
           if (old.state !== 'complete' || typeof old.filename !== 'string' ||
-              !downloadPathMatches(old.filename, msg.oldRelativePath)) {
+              !downloadPathMatches(old.filename, msg.oldRelativePath, true)) {
             throw new Error('Old recovery download does not match its expected path');
           }
           await new Promise((resolve, reject) => chrome.downloads.removeFile(msg.oldDownloadId, () => {
@@ -622,7 +650,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                   const item = items?.[0];
                   resolve({ ...record, status: item?.state === 'complete' &&
                     item.exists === true && typeof item.filename === 'string' &&
-                    downloadPathMatches(item.filename, record.relativePath)
+                    downloadPathMatches(item.filename, record.relativePath, record.kind === 'media')
                     ? 'complete' : item?.state === 'in_progress' ? 'in_progress' : 'missing' });
                 });
               }))));
@@ -833,7 +861,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
                 const searchError = chrome.runtime.lastError;
                 if (searchError) { reject(new Error(searchError.message)); return; }
                 const item = items?.[0];
-                const pathMatches = downloadPathMatches(item?.filename, record.relativePath);
+                const pathMatches = downloadPathMatches(item?.filename, record.relativePath, !record.groupName);
                 resolve({ ...(record.groupName ? { groupName: record.groupName } :
                   { sequence: record.sequence, fileId: record.fileId }),
                   status: item?.state === 'complete'
@@ -912,17 +940,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           (ids.add(item.fileId), sequences.add(item.sequence), true))) {
         sendResponse({ status: 'invalid', error: 'Invalid canonical image entry' }); return false;
       }
-      chrome.storage.local.get(['canonicalIndexes'], res => {
-        const readError = chrome.runtime.lastError;
-        if (readError) { sendResponse({ status: 'error', error: readError.message }); return; }
-        const values = res?.canonicalIndexes && typeof res.canonicalIndexes === 'object' ? { ...res.canonicalIndexes } : {};
+      void queueStorageMutation('canonicalIndexes', async () => {
+        const res = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb), ['canonicalIndexes']);
+        const values = res?.canonicalIndexes && typeof res.canonicalIndexes === 'object'
+          ? { ...res.canonicalIndexes } : {};
         values[`${page}\n${index.folder}`] = index;
         const ordered = Object.entries(values).slice(-10);
-        chrome.storage.local.set({ canonicalIndexes: Object.fromEntries(ordered) }, () => {
-          const error = chrome.runtime.lastError;
-          sendResponse(error ? { status: 'error', error: error.message } : { status: 'saved', count: index.images.length });
-        });
-      });
+        await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
+          { canonicalIndexes: Object.fromEntries(ordered) });
+        return { status: 'saved', count: index.images.length };
+      }).then(sendResponse, error => sendResponse({ status: 'error', error: error.message }));
       return true;
     }
 
@@ -951,9 +978,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return false;
       }
       const storageKey = checkpointStorageKey(checkpoint);
-      chrome.storage.local.get(['promptRetryCheckpoints'], res => {
-        const readError = chrome.runtime.lastError;
-        if (readError) { sendResponse({ status: 'error', error: readError.message }); return; }
+      void queueStorageMutation('promptRetryCheckpoints', async () => {
+        const res = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb),
+          ['promptRetryCheckpoints']);
         const checkpoints = res?.promptRetryCheckpoints && typeof res.promptRetryCheckpoints === 'object'
           ? { ...res.promptRetryCheckpoints } : {};
         const previous = checkpoints[storageKey];
@@ -965,19 +992,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         for (const item of checkpoint.images) combinedById.set(item.fileId, item);
         const combined = { ...checkpoint, images: [...combinedById.values()].sort((a, b) => a.sequence - b.sequence) };
         if (!validPromptRetryCheckpoint(combined)) {
-          sendResponse({ status: 'invalid', error: 'Merged prompt retry checkpoint is invalid' });
-          return;
+          return { status: 'invalid', error: 'Merged prompt retry checkpoint is invalid' };
         }
         if (combined.images.length) checkpoints[storageKey] = combined;
         else delete checkpoints[storageKey];
         const ordered = Object.entries(checkpoints).sort((a, b) =>
           String(b[1]?.createdAt || '').localeCompare(String(a[1]?.createdAt || ''))).slice(0, 10);
-        chrome.storage.local.set({ promptRetryCheckpoints: Object.fromEntries(ordered) }, () => {
-          const error = chrome.runtime.lastError;
-          sendResponse(error ? { status: 'error', error: error.message } :
-            { status: 'saved', count: combined.images.length });
-        });
-      });
+        await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
+          { promptRetryCheckpoints: Object.fromEntries(ordered) });
+        return { status: 'saved', count: combined.images.length };
+      }).then(sendResponse, error => sendResponse({ status: 'error', error: error.message }));
       return true;
     }
 
@@ -992,9 +1016,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return false;
       }
       const storageKey = checkpointStorageKey(checkpoint);
-      chrome.storage.local.get(['imageRetryCheckpoints'], res => {
-        const readError = chrome.runtime.lastError;
-        if (readError) { sendResponse({ status: 'error', error: readError.message }); return; }
+      void queueStorageMutation('imageRetryCheckpoints', async () => {
+        const res = await chromeCall((keys, cb) => chrome.storage.local.get(keys, cb),
+          ['imageRetryCheckpoints']);
         const checkpoints = res?.imageRetryCheckpoints && typeof res.imageRetryCheckpoints === 'object'
           ? { ...res.imageRetryCheckpoints } : {};
         const previous = checkpoints[storageKey];
@@ -1006,19 +1030,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         for (const item of checkpoint.images) combinedById.set(item.fileId, item);
         const combined = { ...checkpoint, images: [...combinedById.values()].sort((a, b) => a.sequence - b.sequence) };
         if (!validImageRetryCheckpoint(combined)) {
-          sendResponse({ status: 'invalid', error: 'Merged image retry checkpoint is invalid' });
-          return;
+          return { status: 'invalid', error: 'Merged image retry checkpoint is invalid' };
         }
         if (combined.images.length) checkpoints[storageKey] = combined;
         else delete checkpoints[storageKey];
         const ordered = Object.entries(checkpoints).sort((a, b) =>
           String(b[1]?.createdAt || '').localeCompare(String(a[1]?.createdAt || ''))).slice(0, 10);
-        chrome.storage.local.set({ imageRetryCheckpoints: Object.fromEntries(ordered) }, () => {
-          const error = chrome.runtime.lastError;
-          sendResponse(error ? { status: 'error', error: error.message } :
-            { status: 'saved', count: combined.images.length });
-        });
-      });
+        await chromeCall((data, cb) => chrome.storage.local.set(data, cb),
+          { imageRetryCheckpoints: Object.fromEntries(ordered) });
+        return { status: 'saved', count: combined.images.length };
+      }).then(sendResponse, error => sendResponse({ status: 'error', error: error.message }));
       return true;
     }
 

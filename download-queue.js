@@ -1,6 +1,7 @@
 /* Per-run application-level congestion control and bounded task admission. */
 (() => {
   const DEFAULT_CONCURRENCY = 6; // Manual default, retained for old preferences.
+  const PROMPT_SAVE_CONCURRENCY = 6;
   const DEFAULT_MODE = 'auto';
   const MAX_CONCURRENCY = 12;
   const AUTO_MAX_CONCURRENCY = 64;
@@ -185,7 +186,7 @@
     });
   }
 
-  const api = { DEFAULT_CONCURRENCY, DEFAULT_MODE, MAX_CONCURRENCY, AUTO_MAX_CONCURRENCY,
+  const api = { DEFAULT_CONCURRENCY, PROMPT_SAVE_CONCURRENCY, DEFAULT_MODE, MAX_CONCURRENCY, AUTO_MAX_CONCURRENCY,
     normalizeConcurrency, createController, run };
   globalThis.ChatGPTDownloadQueue = api;
   if (typeof module !== 'undefined') module.exports = api;
